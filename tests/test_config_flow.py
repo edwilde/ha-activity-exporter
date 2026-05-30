@@ -1,5 +1,7 @@
 """Tests for the Activity Exporter config flow."""
 
+from unittest.mock import patch
+
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
@@ -16,7 +18,15 @@ async def test_user_flow_creates_entry(hass: HomeAssistant) -> None:
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "user"
 
-    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    # Stub our own entry setup so the test stays focused on the flow's
+    # behaviour rather than on panel registration (covered in test_init.py).
+    with patch(
+        "custom_components.ha_activity_exporter.async_setup_entry",
+        return_value=True,
+    ):
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        await hass.async_block_till_done()
+
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == PANEL_TITLE
     assert result["data"] == {}

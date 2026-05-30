@@ -102,6 +102,9 @@ node --test tests/frontend
 
 # Python tests
 pip install -r requirements_test.txt
+# The frontend asset package isn't pulled in by the test helper; install the
+# version Home Assistant core pins so the frontend component can set up:
+pip install -c "$(python -c 'import os,homeassistant;print(os.path.join(os.path.dirname(homeassistant.__file__),"package_constraints.txt"))')" home-assistant-frontend
 pytest
 ```
 
