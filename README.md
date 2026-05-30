@@ -98,7 +98,7 @@ Real Home Assistant testing is intentionally light; correctness is guarded by te
 
 ```bash
 # Frontend pure-function tests (no build step required)
-node --test tests/frontend
+node --test tests/frontend/*.test.mjs
 
 # Python tests
 pip install -r requirements_test.txt
@@ -109,18 +109,6 @@ pytest
 ```
 
 CI runs Home Assistant's `hassfest`, HACS validation, and both test suites on every push.
-
-### Manual test checklist (on a real HA instance)
-
-- [ ] Integration installs and a single "Activity Exporter" entry appears in the sidebar.
-- [ ] Re-adding the integration is prevented (single instance).
-- [ ] Entity selector searches and shows friendly names.
-- [ ] Each preset (24h / 7d / 30d) and a custom range produce sensible results.
-- [ ] "Skip repeats" reduces the row count and only drops no-change rows.
-- [ ] CSV opens cleanly in a spreadsheet; commas/quotes in attributes are intact.
-- [ ] JSON parses and contains the metadata wrapper.
-- [ ] An entity with no history shows the friendly "No history found" message.
-- [ ] Removing the integration removes the sidebar panel.
 
 ## License
 
