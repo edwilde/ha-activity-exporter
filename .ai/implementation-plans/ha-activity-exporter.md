@@ -32,3 +32,41 @@ HA-API correctness, JS correctness, UX/jargon, a11y, security, HACS compliance, 
 adequacy. Fix findings, run test suites, then `review-implementation` against this plan.
 
 Commit per logical milestone; push to remote throughout.
+
+## Built vs intended (Stage 4 — review-implementation)
+
+All 17 tickets delivered and pushed. A 6-dimension adversarial review (with
+per-finding skeptical verification) produced 22 confirmed findings, all fixed.
+Final state: **CI fully green** — Hassfest, HACS validation, Frontend (27 node
+tests), and Python (5 pytest) all pass on GitHub Actions.
+
+Deviations from the original design, and why:
+
+- **CSV headers** changed from `timestamp,state,attributes` to
+  `timestamp,value,details`. Reason: the audience is non-technical, so the
+  human-facing spreadsheet avoids HA jargon. The JSON payload keeps the faithful
+  `state`/`attributes` keys as a stable machine schema for LLMs.
+- **Custom date range** is now interpreted in the **Home Assistant** time zone
+  (new pure `computeRange`/`wallClockToEpochMs` in `exporter-core.js`), not the
+  browser's, so the queried window matches the exported timestamps when the two
+  zones differ. This was a latent correctness bug caught in review.
+- **Single-instance** is handled solely by `single_config_entry: true` in the
+  manifest (core aborts the second flow and hides "Add"); the manual guard and
+  custom abort string were removed as dead/never-shown code.
+- **manifest.json key order** must be `domain, name, then alphabetical` or
+  hassfest fails — fixed (confirmed against the actual CI failure).
+- **CSV formula-injection** guard added (`= + - @` etc. prefixed) — not in the
+  original design but a real spreadsheet-safety issue.
+- **Test environment**: `home-assistant-frontend` (the `hass_frontend` asset
+  package) is not pulled in by `pytest-homeassistant-custom-component`; CI and
+  the README install the version HA core pins so the `frontend` component can
+  set up. The `test_init` suite calls `async_setup_entry` directly (only `http`
+  needed) to stay fast/deterministic.
+- **Repo config**: HACS validation requires GitHub repository **topics** — added
+  (`home-assistant`, `hacs`, `homeassistant`, `home-automation`,
+  `home-assistant-integration`). Brand assets (icon/logo) still need a separate
+  PR to `home-assistant/brands` before public HACS listing (HACS `brands` check
+  is intentionally ignored in CI until then).
+
+Not done by design (out of scope for MVP): multi-entity export, server-side
+streaming for very large ranges, and a real-HA screenshot in the README.
