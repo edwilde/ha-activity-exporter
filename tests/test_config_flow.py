@@ -17,6 +17,8 @@ async def test_user_flow_creates_entry(hass: HomeAssistant) -> None:
     )
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "user"
+    # Confirm-only flow: no fields to fill in.
+    assert result["data_schema"] is None
 
     # Stub our own entry setup so the test stays focused on the flow's
     # behaviour rather than on panel registration (covered in test_init.py).

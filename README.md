@@ -50,10 +50,10 @@ Home Assistant recorded (optionally minus the repeats).
 
 ## What the files look like
 
-**CSV** — one row per recorded change:
+**CSV** — one row per recorded change (`details` holds the extra information recorded alongside the value, as compact JSON):
 
 ```csv
-timestamp,state,attributes
+timestamp,value,details
 2026-05-30T08:01:12+12:00,on,"{""friendly_name"":""Front Door"",""device_class"":""door""}"
 2026-05-30T08:04:55+12:00,off,"{""friendly_name"":""Front Door"",""device_class"":""door""}"
 ```

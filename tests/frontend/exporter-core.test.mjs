@@ -2,9 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  PRESET_DAYS,
   buildFilename,
   buildJsonPayload,
   chunkRangeByDay,
+  computeRange,
   filterStateChanges,
   formatDateForFilename,
   formatTimestamp,
@@ -13,6 +15,7 @@ import {
   sanitizeFilename,
   toCsv,
   toJson,
+  wallClockToEpochMs,
 } from "../../custom_components/ha_activity_exporter/frontend/exporter-core.js";
 
 // --- chunkRangeByDay ------------------------------------------------------
@@ -33,10 +36,8 @@ test("chunkRangeByDay: multi-day range splits on day boundaries and is contiguou
     "2026-01-17T12:00:00.000Z"
   );
   assert.equal(chunks.length, 3);
-  // contiguous: each chunk's end is the next chunk's start
   assert.equal(chunks[0].end, chunks[1].start);
   assert.equal(chunks[1].end, chunks[2].start);
-  // last chunk ends exactly at the requested end
   assert.equal(chunks[2].end, "2026-01-17T12:00:00.000Z");
 });
 
@@ -50,6 +51,53 @@ test("chunkRangeByDay: invalid / inverted ranges yield no chunks", () => {
     chunkRangeByDay("2026-01-15T00:00:00Z", "2026-01-15T00:00:00Z"),
     []
   );
+});
+
+// --- wallClockToEpochMs / computeRange ------------------------------------
+
+test("wallClockToEpochMs: interprets wall clock in the given zone, not the browser", () => {
+  // NZST is +12 in May (no DST), IST is +05:30 — independent of process TZ.
+  assert.equal(
+    wallClockToEpochMs("2026-05-30T08:00", "Pacific/Auckland"),
+    Date.UTC(2026, 4, 29, 20, 0, 0)
+  );
+  assert.equal(
+    wallClockToEpochMs("2026-05-30T08:00", "Asia/Kolkata"),
+    Date.UTC(2026, 4, 30, 2, 30, 0)
+  );
+});
+
+test("wallClockToEpochMs: resolves correctly across a DST boundary", () => {
+  // 10:00 on 2026-03-08 in New York is already EDT (-4) -> 14:00 UTC.
+  assert.equal(
+    wallClockToEpochMs("2026-03-08T10:00", "America/New_York"),
+    Date.UTC(2026, 2, 8, 14, 0, 0)
+  );
+});
+
+test("wallClockToEpochMs: no zone falls back to browser-local parsing", () => {
+  assert.equal(wallClockToEpochMs("2026-05-30T08:00"), Date.parse("2026-05-30T08:00"));
+  assert.ok(Number.isNaN(wallClockToEpochMs("")));
+});
+
+test("computeRange: presets are anchored to now; custom uses the HA zone", () => {
+  const now = Date.UTC(2026, 0, 15, 0, 0, 0);
+  const sevenDays = computeRange("7d", "", "", now, "UTC");
+  assert.equal(sevenDays.endMs, now);
+  assert.equal(sevenDays.startMs, now - PRESET_DAYS["7d"] * 86400000);
+
+  const custom = computeRange(
+    "custom",
+    "2026-05-30T08:00",
+    "2026-05-31T08:00",
+    now,
+    "Pacific/Auckland"
+  );
+  assert.equal(custom.startMs, Date.UTC(2026, 4, 29, 20, 0, 0));
+  assert.equal(custom.endMs, Date.UTC(2026, 4, 30, 20, 0, 0));
+
+  const bad = computeRange("nope", "", "", now, "UTC");
+  assert.ok(Number.isNaN(bad.startMs) && Number.isNaN(bad.endMs));
 });
 
 // --- parseHistoryRecords --------------------------------------------------
@@ -80,6 +128,28 @@ test("parseHistoryRecords: missing entity or attributes handled", () => {
   assert.equal(recs[0].state, "5");
 });
 
+test("parseHistoryRecords: skips no-timestamp rows, junk entries, and coerces state", () => {
+  // A row with neither lu nor lc has no usable time and is skipped.
+  const noTime = parseHistoryRecords(
+    { e: [{ s: "on" }, { s: "off", lu: 1000 }] },
+    "e"
+  );
+  assert.equal(noTime.length, 1);
+  assert.equal(noTime[0].state, "off");
+
+  // null / non-object rows are ignored.
+  const junk = parseHistoryRecords({ e: [null, 5, { s: "x", lu: 1 }] }, "e");
+  assert.equal(junk.length, 1);
+  assert.equal(junk[0].state, "x");
+
+  // numeric/boolean/missing state values are coerced to strings.
+  const coerced = parseHistoryRecords(
+    { e: [{ s: 0, lu: 1 }, { s: false, lu: 2 }, { lu: 3 }] },
+    "e"
+  );
+  assert.deepEqual(coerced.map((r) => r.state), ["0", "false", ""]);
+});
+
 // --- normaliseRecords -----------------------------------------------------
 
 test("normaliseRecords: sorts ascending and drops exact boundary duplicates", () => {
@@ -98,6 +168,17 @@ test("normaliseRecords: sorts ascending and drops exact boundary duplicates", ()
       [3000, "b"],
     ]
   );
+});
+
+test("normaliseRecords: de-dups carried-over state across day chunks (real parse path)", () => {
+  const T = 1768435200;
+  // Chunk 0 ends with the door "on"; chunk 1's include_start_time_state seed
+  // carries the same "on" at the same instant — must collapse to one row.
+  const chunk0 = parseHistoryRecords({ e: [{ s: "on", lu: T, lc: T }] }, "e");
+  const chunk1 = parseHistoryRecords({ e: [{ s: "on", lu: T }] }, "e");
+  const merged = normaliseRecords([...chunk0, ...chunk1]);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].state, "on");
 });
 
 // --- filterStateChanges ---------------------------------------------------
@@ -138,6 +219,18 @@ test("formatTimestamp: applies half-hour offset (IST, +05:30)", () => {
   assert.equal(formatTimestamp(ms, "Asia/Kolkata"), "2026-01-15T05:30:00+05:30");
 });
 
+test("formatTimestamp: DST-crossing records carry different offsets in one zone", () => {
+  // US spring-forward is 2026-03-08; the offset flips from -05:00 to -04:00.
+  assert.equal(
+    formatTimestamp(Date.UTC(2026, 2, 8, 6, 0, 0), "America/New_York"),
+    "2026-03-08T01:00:00-05:00"
+  );
+  assert.equal(
+    formatTimestamp(Date.UTC(2026, 2, 8, 8, 0, 0), "America/New_York"),
+    "2026-03-08T04:00:00-04:00"
+  );
+});
+
 test("formatDateForFilename: date portion in the target zone", () => {
   // 23:30 UTC is already the next day in Auckland (+13).
   const ms = Date.UTC(2026, 0, 15, 23, 30, 0);
@@ -163,19 +256,18 @@ test("buildFilename: entity + date range + extension", () => {
 
 // --- toCsv ----------------------------------------------------------------
 
-test("toCsv: header, CRLF rows, RFC-4180 escaping of attributes", () => {
+test("toCsv: plain-language header, CRLF rows, RFC-4180 escaping of details", () => {
   const records = [
     { timestampMs: Date.UTC(2026, 0, 15, 0, 0, 0), state: "on", attributes: { friendly_name: "Front, Door" } },
   ];
   const csv = toCsv(records, "UTC");
   const lines = csv.split("\r\n");
-  assert.equal(lines[0], "timestamp,state,attributes");
-  // attributes column contains a comma + quotes -> whole field quoted, inner quotes doubled
+  assert.equal(lines[0], "timestamp,value,details");
   assert.ok(lines[1].startsWith("2026-01-15T00:00:00+00:00,on,"));
   assert.ok(lines[1].includes('"{""friendly_name"":""Front, Door""}"'));
 });
 
-test("toCsv: escapes commas/quotes/newlines in state", () => {
+test("toCsv: escapes commas/quotes/newlines in the value", () => {
   const records = [
     { timestampMs: Date.UTC(2026, 0, 15, 0, 0, 0), state: 'a"b,c\nd', attributes: {} },
   ];
@@ -184,9 +276,23 @@ test("toCsv: escapes commas/quotes/newlines in state", () => {
   assert.ok(row.includes('"a""b,c\nd"'));
 });
 
+test("toCsv: neutralises spreadsheet formula injection", () => {
+  const mk = (state) => ({ timestampMs: Date.UTC(2026, 0, 15, 0, 0, 0), state, attributes: {} });
+  const rows = toCsv([mk("=SUM(1+1)"), mk("+1"), mk("-5"), mk("@x"), mk("on")], "UTC").split("\r\n");
+  assert.equal(rows[1], "2026-01-15T00:00:00+00:00,'=SUM(1+1),{}");
+  assert.equal(rows[2], "2026-01-15T00:00:00+00:00,'+1,{}");
+  assert.equal(rows[3], "2026-01-15T00:00:00+00:00,'-5,{}");
+  assert.equal(rows[4], "2026-01-15T00:00:00+00:00,'@x,{}");
+  assert.equal(rows[5], "2026-01-15T00:00:00+00:00,on,{}"); // benign value untouched
+});
+
+test("toCsv: empty records yields the header line only", () => {
+  assert.equal(toCsv([], "UTC"), "timestamp,value,details");
+});
+
 // --- toJson / buildJsonPayload --------------------------------------------
 
-test("buildJsonPayload: self-describing wrapper shape", () => {
+test("buildJsonPayload: self-describing wrapper shape (machine schema keeps HA names)", () => {
   const records = [
     { timestampMs: Date.UTC(2026, 0, 15, 1, 0, 0), state: "on", attributes: { device_class: "door" } },
     { timestampMs: Date.UTC(2026, 0, 15, 2, 0, 0), state: "off", attributes: {} },

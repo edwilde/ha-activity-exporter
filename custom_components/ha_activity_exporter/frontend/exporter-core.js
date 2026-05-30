@@ -15,6 +15,82 @@
  *   lc -> last_changed (epoch SECONDS, float; present only when != lu)
  */
 
+/** Days covered by each named preset. */
+export const PRESET_DAYS = { "24h": 1, "7d": 7, "30d": 30 };
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// --- time zone helpers ----------------------------------------------------
+
+/**
+ * Return the wall-clock string and numeric UTC offset (minutes) of an instant
+ * in a given IANA time zone. Internal helper shared by the formatters and the
+ * wall-clock parser so the offset maths lives in exactly one place.
+ */
+function tzWallAndOffset(ms, timeZone) {
+  const date = new Date(ms);
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(date);
+  const map = {};
+  for (const p of parts) map[p.type] = p.value;
+  const hour = map.hour === "24" ? "00" : map.hour;
+  const wall = `${map.year}-${map.month}-${map.day}T${hour}:${map.minute}:${map.second}`;
+  // Offset = (wall clock interpreted as UTC) - (actual UTC instant).
+  const offsetMin = Math.round((Date.parse(`${wall}Z`) - date.getTime()) / 60000);
+  return { wall, offsetMin };
+}
+
+/**
+ * Convert a wall-clock string ("YYYY-MM-DDTHH:mm", as produced by an
+ * <input type="datetime-local">) into an epoch-ms instant, interpreting it in
+ * the given IANA time zone rather than the browser's. Falls back to the
+ * browser's zone (Date.parse) when no time zone is supplied.
+ */
+export function wallClockToEpochMs(wallClock, timeZone) {
+  if (!wallClock) return NaN;
+  if (!timeZone) return Date.parse(wallClock);
+  const provisional = Date.parse(`${wallClock}Z`); // treat the wall time as UTC
+  if (!Number.isFinite(provisional)) return NaN;
+  // First guess using the offset at the provisional instant, then correct once
+  // in case the guess landed on the other side of a DST transition.
+  const firstOffset = tzWallAndOffset(provisional, timeZone).offsetMin;
+  let epoch = provisional - firstOffset * 60000;
+  const secondOffset = tzWallAndOffset(epoch, timeZone).offsetMin;
+  if (secondOffset !== firstOffset) {
+    epoch = provisional - secondOffset * 60000;
+  }
+  return epoch;
+}
+
+/**
+ * Resolve the export window (epoch ms) for the chosen preset or custom range.
+ * Custom wall-clock values are interpreted in `timeZone` so the queried window
+ * matches the timestamps shown in the exported file.
+ *
+ * @returns {{startMs:number, endMs:number}} (values are NaN when not resolvable)
+ */
+export function computeRange(preset, customStart, customEnd, nowMs, timeZone) {
+  if (preset === "custom") {
+    return {
+      startMs: wallClockToEpochMs(customStart, timeZone),
+      endMs: wallClockToEpochMs(customEnd, timeZone),
+    };
+  }
+  const days = PRESET_DAYS[preset];
+  if (!days) return { startMs: NaN, endMs: NaN };
+  return { startMs: nowMs - days * DAY_MS, endMs: nowMs };
+}
+
+// --- history fetching helpers ---------------------------------------------
+
 /**
  * Split an ISO time range into <= 1-day chunks so history can be fetched
  * incrementally with real progress feedback.
@@ -29,7 +105,6 @@ export function chunkRangeByDay(startISO, endISO) {
   if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
     return [];
   }
-  const DAY_MS = 24 * 60 * 60 * 1000;
   const chunks = [];
   let cursor = startMs;
   while (cursor < endMs) {
@@ -106,6 +181,8 @@ export function filterStateChanges(records) {
   return out;
 }
 
+// --- formatting -----------------------------------------------------------
+
 /**
  * Format an epoch-ms instant as ISO-8601 with the numeric offset of the given
  * IANA time zone (e.g. "2026-05-30T08:01:12+12:00"). Falls back to UTC ("...Z")
@@ -117,22 +194,7 @@ export function filterStateChanges(records) {
 export function formatTimestamp(ms, timeZone) {
   const date = new Date(ms);
   if (!timeZone) return date.toISOString();
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    hour12: false,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).formatToParts(date);
-  const map = {};
-  for (const p of parts) map[p.type] = p.value;
-  const hour = map.hour === "24" ? "00" : map.hour;
-  const wall = `${map.year}-${map.month}-${map.day}T${hour}:${map.minute}:${map.second}`;
-  // Offset = (wall clock interpreted as UTC) - (actual UTC instant).
-  const offsetMin = Math.round((Date.parse(`${wall}Z`) - date.getTime()) / 60000);
+  const { wall, offsetMin } = tzWallAndOffset(ms, timeZone);
   const sign = offsetMin >= 0 ? "+" : "-";
   const abs = Math.abs(offsetMin);
   const oh = String(Math.floor(abs / 60)).padStart(2, "0");
@@ -161,18 +223,24 @@ export function buildFilename(entityId, startMs, endMs, ext, timeZone) {
   return `${base}.${ext}`;
 }
 
-/** Escape a single CSV field per RFC-4180. */
+/**
+ * Escape a single CSV field per RFC-4180, and neutralise spreadsheet formula
+ * injection: a field whose first character is one of = + - @ (tab/CR) is
+ * prefixed with a single quote so Excel/Sheets treat it as text, not a formula.
+ */
 function csvEscape(value) {
-  const s = value == null ? "" : String(value);
+  let s = value == null ? "" : String(value);
+  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
 /**
  * Build CSV text (CRLF line endings, RFC-4180 quoting).
- * Columns: timestamp, state, attributes (attributes as a compact JSON string).
+ * Plain-language columns: timestamp, value, details (details is a compact JSON
+ * string of the extra information recorded alongside the value).
  */
 export function toCsv(records, timeZone) {
-  const lines = ["timestamp,state,attributes"];
+  const lines = ["timestamp,value,details"];
   for (const r of records) {
     lines.push(
       [
@@ -186,7 +254,9 @@ export function toCsv(records, timeZone) {
 }
 
 /**
- * Build the self-describing JSON payload object.
+ * Build the self-describing JSON payload object. The keys here are a stable
+ * machine schema (kept faithful to Home Assistant's own naming) so an LLM has
+ * unambiguous context.
  *
  * @param {{entityId:string, friendlyName?:string, exportedAtMs:number,
  *          periodStartMs:number, periodEndMs:number, stateChangesOnly:boolean}} meta

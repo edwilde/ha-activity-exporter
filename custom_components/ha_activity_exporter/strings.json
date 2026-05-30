@@ -5,9 +5,6 @@
         "title": "Add Activity Exporter",
         "description": "This adds an \"Activity Exporter\" page to your sidebar, where you can export the history of any device or sensor to a file. There is nothing to configure — just select Submit."
       }
-    },
-    "abort": {
-      "single_instance_allowed": "Activity Exporter is already set up. Only one copy is needed."
     }
   }
 }

@@ -21,10 +21,12 @@ class ActivityExporterConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Handle the initial (and only) step."""
-        if self._async_current_entries():
-            return self.async_abort(reason="single_instance_allowed")
+        """Handle the initial (and only) step.
 
+        ``single_config_entry`` in the manifest makes Home Assistant core abort a
+        second user flow (and hide the "Add" button) on its own, so no manual
+        guard is needed here.
+        """
         if user_input is not None:
             return self.async_create_entry(title=PANEL_TITLE, data={})
 

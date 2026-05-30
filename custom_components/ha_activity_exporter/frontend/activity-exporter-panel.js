@@ -15,6 +15,7 @@
 import {
   buildFilename,
   chunkRangeByDay,
+  computeRange,
   filterStateChanges,
   normaliseRecords,
   parseHistoryRecords,
@@ -22,10 +23,11 @@ import {
   toJson,
 } from "./exporter-core.js";
 
+// Chip labels; the actual day counts live in exporter-core.js (PRESET_DAYS).
 const PRESETS = {
-  "24h": { label: "Last 24 hours", days: 1 },
-  "7d": { label: "Last 7 days", days: 7 },
-  "30d": { label: "Last 30 days", days: 30 },
+  "24h": { label: "Last 24 hours" },
+  "7d": { label: "Last 7 days" },
+  "30d": { label: "Last 30 days" },
 };
 
 // Above this many rows we show a gentle heads-up before the download.
@@ -121,12 +123,17 @@ const STYLES = `
   .progress .track { height: 8px; background: var(--divider-color, #ddd); border-radius: 999px; overflow: hidden; }
   .progress .bar { height: 100%; width: 0%; background: var(--primary-color); transition: width 0.2s; }
   .progress .label { font-size: 0.85rem; color: var(--secondary-text-color); margin-top: 8px; }
-  .status { margin-top: 20px; padding: 14px 16px; border-radius: 10px; font-size: 0.92rem; line-height: 1.45; display: none; }
+  /* Status uses a high-contrast text colour plus a coloured left border, so
+     meaning is never conveyed by colour alone and text always meets contrast. */
+  .status { margin-top: 20px; padding: 14px 16px; border-radius: 10px; font-size: 0.92rem; line-height: 1.45; display: none; color: var(--primary-text-color); border-left: 4px solid var(--divider-color, #ccc); }
   .status.show { display: block; }
-  .status.error { background: rgba(var(--rgb-error-color, 219,68,55), 0.12); color: var(--error-color, #db4437); }
-  .status.empty { background: var(--secondary-background-color, #f3f3f3); color: var(--secondary-text-color); }
-  .status.success { background: rgba(var(--rgb-success-color, 67,160,71), 0.12); color: var(--success-color, #43a047); }
-  .status.warn { background: rgba(var(--rgb-warning-color, 255,160,0), 0.14); color: var(--warning-color, #ffa000); }
+  .status.error { background: rgba(var(--rgb-error-color, 219,68,55), 0.12); border-left-color: var(--error-color, #db4437); }
+  .status.empty { background: var(--secondary-background-color, #f3f3f3); border-left-color: var(--divider-color, #ccc); }
+  .status.success { background: rgba(var(--rgb-success-color, 67,160,71), 0.12); border-left-color: var(--success-color, #43a047); }
+  .status.warn { background: rgba(var(--rgb-warning-color, 255,160,0), 0.14); border-left-color: var(--warning-color, #ffa000); }
+  /* Visible keyboard focus on every interactive control. */
+  .chip:focus-visible, button.export:focus-visible, .toggle-row input:focus-visible { outline: 2px solid var(--primary-text-color); outline-offset: 2px; }
+  .chip[aria-pressed="true"]:focus-visible, #export-csv:focus-visible { outline-color: var(--text-primary-color, #fff); }
   :host(.narrow) .card { padding: 16px; }
   :host(.narrow) button.export { flex-basis: 100%; }
 `;
@@ -235,9 +242,9 @@ class ActivityExporterPanel extends HTMLElement {
           </button>
         </div>
 
-        <div class="progress" id="progress" aria-live="polite">
-          <div class="track"><div class="bar" id="progress-bar"></div></div>
-          <div class="label" id="progress-label">Gathering history…</div>
+        <div class="progress" id="progress">
+          <div class="track" id="progress-track" role="progressbar" aria-label="Gathering your history" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="bar" id="progress-bar"></div></div>
+          <div class="label" id="progress-label" aria-hidden="true">Gathering history…</div>
         </div>
 
         <div class="status" id="status" role="status" aria-live="polite"></div>
@@ -254,6 +261,7 @@ class ActivityExporterPanel extends HTMLElement {
       csvBtn: root.getElementById("export-csv"),
       jsonBtn: root.getElementById("export-json"),
       progress: root.getElementById("progress"),
+      progressTrack: root.getElementById("progress-track"),
       progressBar: root.getElementById("progress-bar"),
       progressLabel: root.getElementById("progress-label"),
       status: root.getElementById("status"),
@@ -273,6 +281,8 @@ class ActivityExporterPanel extends HTMLElement {
     });
     this._els.skipRepeats.addEventListener("change", (e) => {
       this._skipRepeats = e.target.checked;
+      // Clear any stale "downloaded N rows" banner from a previous export.
+      this._updateButtons();
     });
     this._els.csvBtn.addEventListener("click", () => this._export("csv"));
     this._els.jsonBtn.addEventListener("click", () => this._export("json"));
@@ -300,6 +310,8 @@ class ActivityExporterPanel extends HTMLElement {
     custom.textContent = "Choose your own dates";
     custom.dataset.preset = "custom";
     custom.setAttribute("aria-pressed", String(this._preset === "custom"));
+    custom.setAttribute("aria-controls", "custom-dates");
+    custom.setAttribute("aria-expanded", String(this._preset === "custom"));
     custom.addEventListener("click", () => this._selectPreset("custom"));
     group.appendChild(custom);
   }
@@ -309,6 +321,8 @@ class ActivityExporterPanel extends HTMLElement {
     for (const chip of this._els.presets.querySelectorAll(".chip")) {
       chip.setAttribute("aria-pressed", String(chip.dataset.preset === key));
     }
+    const customChip = this._els.presets.querySelector('.chip[data-preset="custom"]');
+    if (customChip) customChip.setAttribute("aria-expanded", String(key === "custom"));
     this._els.customDates.classList.toggle("open", key === "custom");
     this._invalidateCache();
     this._updateButtons();
@@ -327,12 +341,18 @@ class ActivityExporterPanel extends HTMLElement {
         picker = document.createElement("ha-entity-picker");
         picker.id = "entity-control";
         picker.allowCustomEntity = false;
+        // Give the picker its own accessible name (a <label for> does not
+        // reliably associate with a custom element's inner input).
+        picker.label = "What do you want to export?";
         picker.addEventListener("value-changed", (e) => {
           this._entityId = e.detail.value || "";
           this._invalidateCache();
           this._updateButtons();
         });
         host.appendChild(picker);
+        // Carry over any selection made via the fallback before the picker
+        // became available.
+        if (this._entityId) picker.value = this._entityId;
       }
       picker.hass = this._hass;
       return;
@@ -366,14 +386,26 @@ class ActivityExporterPanel extends HTMLElement {
   _populateFallbackOptions() {
     const list = this._els.entityControl.querySelector("#entity-options");
     if (!list) return;
-    const entries = Object.keys(this._hass.states || {}).sort();
+    const states = this._hass.states || {};
+    const ids = Object.keys(states).sort();
     // Only rebuild when the count changes, to avoid clobbering on every tick.
-    if (list.childElementCount === entries.length) return;
+    if (this._fallbackMap && list.childElementCount === ids.length) return;
+
+    // Show friendly names; only fall back to the raw id to disambiguate
+    // genuinely duplicate names. Keep a display -> id map for resolution.
+    const nameCounts = {};
+    for (const id of ids) {
+      const name = states[id]?.attributes?.friendly_name || id;
+      nameCounts[name] = (nameCounts[name] || 0) + 1;
+    }
+    this._fallbackMap = new Map();
     list.innerHTML = "";
-    for (const id of entries) {
-      const friendly = this._hass.states[id]?.attributes?.friendly_name || id;
+    for (const id of ids) {
+      const friendly = states[id]?.attributes?.friendly_name || id;
+      const display = nameCounts[friendly] > 1 ? `${friendly} (${id})` : friendly;
+      this._fallbackMap.set(display, id);
       const opt = document.createElement("option");
-      opt.value = `${friendly} — ${id}`;
+      opt.value = display;
       list.appendChild(opt);
     }
   }
@@ -381,12 +413,11 @@ class ActivityExporterPanel extends HTMLElement {
   _resolveFallbackValue(value) {
     const v = (value || "").trim();
     if (!v) return "";
-    // Accept "Friendly — entity.id", a bare entity id, or a friendly name.
-    const dashIdx = v.lastIndexOf(" — ");
-    if (dashIdx !== -1) {
-      const candidate = v.slice(dashIdx + 3).trim();
-      if (this._hass.states[candidate]) return candidate;
+    // Prefer the display -> id map built when options were populated.
+    if (this._fallbackMap && this._fallbackMap.has(v)) {
+      return this._fallbackMap.get(v);
     }
+    // Also accept a bare entity id or an exact friendly-name match.
     if (this._hass.states[v]) return v;
     for (const [id, st] of Object.entries(this._hass.states || {})) {
       if ((st.attributes?.friendly_name || "") === v) return id;
@@ -397,15 +428,15 @@ class ActivityExporterPanel extends HTMLElement {
   // --- Time range ---------------------------------------------------------
 
   _computeRange() {
-    if (this._preset === "custom") {
-      const startMs = Date.parse(this._customStart);
-      const endMs = Date.parse(this._customEnd);
-      return { startMs, endMs };
-    }
-    const cfg = PRESETS[this._preset];
-    const endMs = Date.now();
-    const startMs = endMs - cfg.days * 24 * 60 * 60 * 1000;
-    return { startMs, endMs };
+    // Custom wall-clock dates are interpreted in the Home Assistant time zone
+    // (not the browser's) so the queried window matches the exported timestamps.
+    return computeRange(
+      this._preset,
+      this._customStart,
+      this._customEnd,
+      Date.now(),
+      this._hass?.config?.time_zone
+    );
   }
 
   _rangeValid() {
@@ -416,13 +447,25 @@ class ActivityExporterPanel extends HTMLElement {
   // --- Buttons / status ---------------------------------------------------
 
   _updateButtons() {
-    const ready = !!this._entityId && this._rangeValid() && !this._busy;
+    const hasEntity = !!this._entityId;
+    const ready = hasEntity && this._rangeValid() && !this._busy;
     this._els.csvBtn.disabled = !ready;
     this._els.jsonBtn.disabled = !ready;
 
-    if (this._preset === "custom" && this._entityId && !this._rangeValid()) {
-      this._showStatus("warn", "Please choose a valid date range — the “To” date must be after the “From” date.");
-    } else if (this._els.status.classList.contains("warn")) {
+    if (this._busy) return;
+
+    // Guidance also clears any stale result banner whenever inputs change.
+    if (!hasEntity) {
+      this._showStatus(
+        "empty",
+        "Pick a device or sensor above to turn on the download buttons."
+      );
+    } else if (this._preset === "custom" && !this._rangeValid()) {
+      this._showStatus(
+        "warn",
+        "Please choose a valid date range — the “To” date must be after the “From” date."
+      );
+    } else {
       this._hideStatus();
     }
   }
@@ -441,12 +484,14 @@ class ActivityExporterPanel extends HTMLElement {
   _setProgress(percent, label) {
     this._els.progress.classList.add("show");
     this._els.progressBar.style.width = `${percent}%`;
+    this._els.progressTrack.setAttribute("aria-valuenow", String(percent));
     if (label) this._els.progressLabel.textContent = label;
   }
 
   _hideProgress() {
     this._els.progress.classList.remove("show");
     this._els.progressBar.style.width = "0%";
+    this._els.progressTrack.setAttribute("aria-valuenow", "0");
   }
 
   _invalidateCache() {
@@ -487,7 +532,7 @@ class ActivityExporterPanel extends HTMLElement {
     if (!records.length) {
       this._showStatus(
         "empty",
-        "No history found. Home Assistant may not be recording this item, or there was no activity in the period you chose."
+        "We couldn't find any history for this device or sensor in the time period you chose. Try a longer time period — some devices don't keep a long history."
       );
       return;
     }
