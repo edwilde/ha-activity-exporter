@@ -1,0 +1,13 @@
+{
+  "domain": "ha_activity_exporter",
+  "name": "Activity Exporter",
+  "version": "0.1.0",
+  "documentation": "https://github.com/edwilde/ha-activity-exporter",
+  "issue_tracker": "https://github.com/edwilde/ha-activity-exporter/issues",
+  "codeowners": ["@edwilde"],
+  "iot_class": "calculated",
+  "integration_type": "service",
+  "config_flow": true,
+  "single_config_entry": true,
+  "dependencies": ["http", "frontend", "panel_custom"]
+}
