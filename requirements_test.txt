@@ -1,0 +1,3 @@
+# Brings in a matching Home Assistant core plus pytest, pytest-asyncio and the
+# custom-integration test helpers. Pin loosely so CI tracks current HA releases.
+pytest-homeassistant-custom-component
