@@ -49,7 +49,7 @@ ha-activity-exporter/
 - **JS served at:** `/ha_activity_exporter/activity-exporter-panel.js`
 - **Web component tag / `webcomponent_name`:** `activity-exporter-panel`
 - **Sidebar URL path (`frontend_url_path`):** `activity-exporter`
-- **Sidebar title / icon:** "Activity Exporter" / `mdi:file-export-outline`
+- **Sidebar title / icon:** "Activity Exporter" / `mdi:file-export`
 - **Normalised record shape:** `{ timestamp: <ISO8601 with tz offset>, state: <string>, attributes: <object> }`
 - **Pure functions (exported for tests):** `filterStateChanges(records)`, `chunkRangeByDay(startISO, endISO)`, `toCsv(records)`, `toJson(meta, records)`, `sanitizeFilename(s)`
 
@@ -58,7 +58,7 @@ ha-activity-exporter/
 - `async_setup_entry`:
   1. `await hass.http.async_register_static_paths([StaticPathConfig("/ha_activity_exporter/activity-exporter-panel.js", <abs path>, False)])`
      — note: `register_static_path` is deprecated and removed in 2025.7; must use the async variant.
-  2. `await panel_custom.async_register_panel(hass, webcomponent_name="activity-exporter-panel", frontend_url_path="activity-exporter", module_url="/ha_activity_exporter/activity-exporter-panel.js", sidebar_title="Activity Exporter", sidebar_icon="mdi:file-export-outline", require_admin=False, config={})`
+  2. `await panel_custom.async_register_panel(hass, webcomponent_name="activity-exporter-panel", frontend_url_path="activity-exporter", module_url="/ha_activity_exporter/activity-exporter-panel.js", sidebar_title="Activity Exporter", sidebar_icon="mdi:file-export", require_admin=False, config={})`
 - `async_unload_entry`: `frontend.async_remove_panel(hass, "activity-exporter")`.
 - `config_flow.py`: single-instance flow — one confirmation step, `async_abort` if already configured. No user-facing settings.
 

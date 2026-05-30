@@ -7,7 +7,9 @@ DOMAIN = "ha_activity_exporter"
 # Sidebar panel registration.
 PANEL_URL_PATH = "activity-exporter"
 PANEL_TITLE = "Activity Exporter"
-PANEL_ICON = "mdi:file-export-outline"
+# Filled "export" glyph (a page with an out-arrow). Reads clearly at sidebar
+# size, unlike the thin outline variant. Valid across all supported HA versions.
+PANEL_ICON = "mdi:file-export"
 PANEL_WEBCOMPONENT_NAME = "activity-exporter-panel"
 
 # The whole frontend/ directory is served under this URL base (the panel imports
