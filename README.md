@@ -9,6 +9,8 @@ Home Assistant so you can open it in a spreadsheet or hand it to an AI for analy
 > **Designed for everyone.** You don't need to know any Home Assistant jargon to use
 > it. Pick a thing, pick a time period, click download.
 
+![The Activity Exporter panel in the Home Assistant sidebar](docs/images/activity-exporter-panel.jpg)
+
 ## What it does
 
 - 🔎 **Pick one device or sensor** with a searchable selector.
