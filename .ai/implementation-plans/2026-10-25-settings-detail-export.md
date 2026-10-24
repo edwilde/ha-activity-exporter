@@ -129,7 +129,7 @@
 > **Review [2026-10-25]:**
 > **Status:** Deviated (approved, one part reworked)
 > **What changed:** The logbook request runs alongside each chunk's history request (its own `.catch`). When it fails the download message says causes were unavailable. `changed_by` names a person from `person.*` entries' `user_id` (`userNamesFromStates`). Matching uses a binary search. README "How it works" now names the logbook call.
-> **Root cause:** Code review: sequential round trips doubled export time; a silent failure misled users; a bare user id is meaningless to the audience; O(entries x records) matching froze on chatty devices. The first version skipped the cache after a logbook failure, which would refetch on every click on installs without a logbook; reworked to cache the records together with the "causes unavailable" flag.
+> **Root cause:** Code review: sequential round trips doubled export time; a silent failure misled users; a bare user id is meaningless to the audience; O(entries x records) matching froze on chatty devices. The first version skipped the cache after a logbook failure, which would refetch on every click on installs without a logbook; reworked to cache the records together with the "causes unavailable" flag; exporting the same cached range again retries only the logbook requests.
 > **Decision:** Approved, cache behaviour reworked.
 
 **Files:** `exporter-core.js` (new `// --- causes ---` section), panel `_loadRecords`, tests, README.
