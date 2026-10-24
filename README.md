@@ -48,8 +48,8 @@ Home Assistant recorded (optionally minus the repeats).
 1. Open **Activity Exporter** from the sidebar.
 2. **What do you want to export?** — start typing the name of a device or sensor and pick it.
 3. **Time period** — tap a quick button, or choose your own start and end dates.
-4. Leave **Give each setting its own column** on to get one spreadsheet column per setting (brightness, colour, temperature and so on), or turn it off for a simple three-column file.
-5. Optionally turn on **Skip repeats** to leave out rows where nothing changed.
+4. Optionally turn on **Skip repeats** to leave out rows where nothing changed.
+5. Leave **Give each setting its own column** on to get one spreadsheet column per setting (brightness, colour, temperature and so on), or turn it off for a simple three-column file.
 6. Click **Download spreadsheet (CSV)** or **Download data file (JSON)**.
 
 ## What the files look like
@@ -144,9 +144,10 @@ When Home Assistant knows what caused a change, the spreadsheet gains a `changed
 
 The panel runs entirely in your browser, using your existing Home Assistant login.
 It reads history over Home Assistant's WebSocket API (`history/history_during_period`),
-builds the file in your browser, and downloads it directly. Nothing is sent anywhere
-else, and no extra server endpoints are added. Large date ranges are fetched a day at
-a time so you get a real progress bar.
+asks the logbook (`logbook/get_events`) what caused each change, builds the file in
+your browser, and downloads it directly. Nothing is sent anywhere else, and no extra
+server endpoints are added. Large date ranges are fetched a day at a time so you get a
+real progress bar.
 
 ## Limitations
 

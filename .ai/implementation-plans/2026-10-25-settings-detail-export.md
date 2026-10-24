@@ -23,6 +23,7 @@
 ## Branch 1: `feature/faithful-attribute-history`
 
 ### Task 1: Row timing and attribute-aware dedupe
+<!-- REVIEW: completed -->
 
 **Files:**
 - Modify: `custom_components/ha_activity_exporter/frontend/exporter-core.js:121-180`
@@ -41,6 +42,13 @@
 **Verify:** New tests: a ramp fixture (same `lc`, ascending `lu`, state `on`) yields N rows with distinct timestamps; Skip repeats keeps every brightness/colour step and drops an exact repeat; a media-position-only change counts as a repeat. All existing tests pass (update ones that asserted `lc` timing).
 
 ### Task 2: Column model
+<!-- REVIEW: deviated (approved) -->
+
+> **Review [2026-10-25]:**
+> **Status:** Deviated (approved)
+> **What changed:** `buildColumns(records, metadata)` and `flattenAttributes(attributes, metadata)` take the metadata set computed once by `metadataKeys(records)`; `mode` is not a metadata name.
+> **Root cause:** The metadata set depends on every exported record (the constant guard), so it is computed once per export and passed in rather than recomputed per row. A humidifier's `mode` is a real setting, so treating it as metadata would hide it from the CSV.
+> **Decision:** Approved (triaged by Claude while Ed was away).
 
 **Files:**
 - Modify: `exporter-core.js` (new section `// --- settings columns ---`)
@@ -55,6 +63,13 @@
 **Verify:** Tests: bedside `hs` light gives hue/saturation and `brightness_percent` 1.2 for brightness 3; colour-mode switch `color_temp`→`hs` fills `color_temp_kelvin` then hue/saturation; off row leaves light cells blank; rgbw light without `rgb_color` gives red/green/blue/white = 165/136/0/88 and no `rgbw_color` in details; rgbw light *with* `rgb_color` keeps `rgbw_color` in details; thermostat attributes (`current_temperature: -3.5`, `temperature`, `hvac_action`) become columns and `hvac_modes`/`min_temp` do not; a `max_value` that varies gets a column; a plain sensor with only metadata yields no extra columns.
 
 ### Task 3: CSV and JSON output
+<!-- REVIEW: deviated (approved) -->
+
+> **Review [2026-10-25]:**
+> **Status:** Deviated (approved)
+> **What changed:** `entity.capabilities` holds the metadata keys that stay constant across the export (from the latest row that has them), not every metadata-named key of the last row. The split CSV header goes through `csvEscape`, and an attribute whose `attribute_` rename collides with a real attribute goes to `details`.
+> **Root cause:** Capabilities reuse the metadata rule, so a value that changes during the period is a setting (it gets a CSV column and stays in each record's `attributes`), not a capability. Header escaping and the collision rule came from code review: attribute names are device-controlled text.
+> **Decision:** Approved (triaged by Claude while Ed was away).
 
 **Files:**
 - Modify: `exporter-core.js` (`csvEscape`, `toCsv`, `buildJsonPayload`, `toJson`)
@@ -70,6 +85,13 @@
 **Verify:** Tests: split CSV header for the bedside fixture equals `timestamp,value,seconds_since_previous,brightness,brightness_percent,color_mode,hue,saturation,red,green,blue,x,y,details` (or whatever columns that fixture actually fills, asserted exactly); `-3.5` stays numeric; `=cmd` is still neutralised; JSON settings-only row has `state_changed: false`; `entity.capabilities.supported_color_modes` comes from the latest row.
 
 ### Task 4: Panel switch and wiring
+<!-- REVIEW: deviated (approved) -->
+
+> **Review [2026-10-25]:**
+> **Status:** Deviated (approved)
+> **What changed:** The Skip repeats label is now just "Skip repeats" with help "Leave out rows where neither the value nor any setting changed."
+> **Root cause:** The design audit (Task 7) found the long label wrapped to two lines on phones and ran into its help text.
+> **Decision:** Approved (triaged by Claude while Ed was away).
 
 **Files:**
 - Modify: `custom_components/ha_activity_exporter/frontend/activity-exporter-panel.js`
@@ -86,6 +108,12 @@
 **Verify:** `node --check` on the panel; render in the mock-hass harness (scratchpad) and confirm the switch shows checked and the CSV header changes when toggled.
 
 ### Task 5: Docs and version
+<!-- REVIEW: deviated (approved) -->
+
+> **Review [2026-10-25]:**
+> **Status:** Deviated (approved after rework)
+> **What changed:** README listed the two switches in the opposite order to the panel; fixed in `fix/review-followups`. Release tags use the bare version (`1.1.0`), matching the existing `1.0.0`/`1.0.1` tags; CLAUDE.md now says so.
+> **Decision:** Rework done.
 
 **Files:** `README.md`, `docs/plans/2026-05-31-ha-activity-exporter-design.md` (note the superseded skip-repeats rule and CSV columns, pointing at the new design), `custom_components/ha_activity_exporter/manifest.json` (`1.1.0`), `CLAUDE.md` (lu/lc fact).
 
@@ -96,6 +124,13 @@
 ## Branch 2: `feature/change-causes`
 
 ### Task 6: Logbook causes
+<!-- REVIEW: deviated (approved) -->
+
+> **Review [2026-10-25]:**
+> **Status:** Deviated (approved, one part reworked)
+> **What changed:** The logbook request runs alongside each chunk's history request (its own `.catch`). When it fails the download message says causes were unavailable. `changed_by` names a person from `person.*` entries' `user_id` (`userNamesFromStates`). Matching uses a binary search. README "How it works" now names the logbook call.
+> **Root cause:** Code review: sequential round trips doubled export time; a silent failure misled users; a bare user id is meaningless to the audience; O(entries x records) matching froze on chatty devices. The first version skipped the cache after a logbook failure, which would refetch on every click on installs without a logbook; reworked to cache the records together with the "causes unavailable" flag; exporting the same cached range again retries only the logbook requests.
+> **Decision:** Approved, cache behaviour reworked.
 
 **Files:** `exporter-core.js` (new `// --- causes ---` section), panel `_loadRecords`, tests, README.
 
@@ -112,6 +147,7 @@
 ## Branch 3: `feature/panel-polish`
 
 ### Task 7: Hallmark audit fixes
+<!-- REVIEW: completed -->
 
 Run `/hallmark` audit on the panel (rendered in the mock-hass harness), fix what it finds that fits HA theming and the plain-language invariant, and re-take the README screenshot if the harness can stand in for HA.
 
@@ -126,4 +162,36 @@ Run `/hallmark` audit on the panel (rendered in the mock-hass harness), fix what
 
 ## Review record
 
-(populated post-implementation by the `review-implementation` skill)
+**Reviewed:** 2026-10-25
+**Reviewer:** Claude (Opus subagent, fresh context); triage by Claude on Ed's behalf (Ed AFK, asked for best judgement)
+**Range:** b621ccb..main (15 commits), follow-ups on `fix/review-followups`
+
+### Verification Results
+- **Tests:** node 100 passed, 0 failed; pytest 5 passed. CI (hassfest, HACS, both suites) green on every branch.
+- **Lint:** none configured. 11 spot mutations on a scratch copy, all caught.
+
+### Triage Summary
+| # | Finding | Type | Decision |
+|---|---------|------|----------|
+| 1 | Logbook failure noticed and not cached | Deviation | Notice approved; caching reworked |
+| 2 | Logbook fetched alongside history | Deviation | Approved |
+| 3 | Person names in changed_by | Unplanned | Approved |
+| 4 | Extra metadata parameter | Deviation | Approved |
+| 5 | Capabilities = constant metadata only | Deviation | Approved |
+| 6 | Skip repeats label shortened | Deviation | Approved |
+| 7 | README switch order | Deviation | Fixed |
+| 8 | README omits logbook call | Missing | Fixed |
+| 9 | No 1.1.0 tag | Missing | Released as `1.1.0` |
+
+### Technical Context & Learnings
+- HA compressed history rows: time by `lu`; `lc` (earlier value-change time) only appears when it differs. Timing by `lc` collapses every settings-only row onto the last on/off.
+- `logbook/get_events` entries carry `when` equal to the state's `lu`, so causes match history rows exactly (1 ms window); settings-only rows never have logbook entries.
+- Preset ranges ("Last 24 hours" etc.) are computed from `Date.now()` per export, so the record cache only hits for custom date ranges; presets always refetch fresh data.
+- The GitHub Actions workflow had been auto-disabled for inactivity; it was re-enabled on 2026-10-25.
+
+### Items Requiring Rework
+None.
+
+### Deferred/Skipped Items
+- Sibling entities (e.g. `number.<light>_on_level`) not exported (design decision).
+- Minor edge cases left as-is: empty list attribute becomes a `[]` column; a scalar attribute named like a tuple column (`red`, `x`) blocks that tuple's split.

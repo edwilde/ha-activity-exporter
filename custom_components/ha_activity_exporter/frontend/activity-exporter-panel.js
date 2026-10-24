@@ -179,6 +179,7 @@ class ActivityExporterPanel extends HTMLElement {
     // format or toggling "skip repeats" or "own column" never refetches.
     this._cacheKey = null;
     this._cacheRecords = null;
+    this._cacheCausesUnavailable = false;
     this._causesUnavailable = false;
 
     this._busy = false;
@@ -535,6 +536,7 @@ class ActivityExporterPanel extends HTMLElement {
   _invalidateCache() {
     this._cacheKey = null;
     this._cacheRecords = null;
+    this._cacheCausesUnavailable = false;
   }
 
   // --- Export -------------------------------------------------------------
@@ -625,14 +627,15 @@ class ActivityExporterPanel extends HTMLElement {
 
   async _loadRecords(startMs, endMs) {
     const key = `${this._entityId}|${startMs}|${endMs}`;
-    if (this._cacheKey === key && this._cacheRecords) {
-      this._causesUnavailable = false;
-      return this._cacheRecords;
-    }
-
     const startISO = new Date(startMs).toISOString();
     const endISO = new Date(endMs).toISOString();
     const chunks = chunkRangeByDay(startISO, endISO);
+
+    if (this._cacheKey === key && this._cacheRecords) {
+      if (this._cacheCausesUnavailable) await this._retryCauses(chunks);
+      this._causesUnavailable = this._cacheCausesUnavailable;
+      return this._cacheRecords;
+    }
 
     this._setProgress(0, "Gathering history… 0%");
     let collected = [];
@@ -640,16 +643,7 @@ class ActivityExporterPanel extends HTMLElement {
     let causesAvailable = true;
     for (let i = 0; i < chunks.length; i++) {
       // Causes are optional: the first failed logbook request turns them off for this export.
-      const logbookRequest = causesAvailable
-        ? this._hass
-            .callWS({
-              type: "logbook/get_events",
-              start_time: chunks[i].start,
-              end_time: chunks[i].end,
-              entity_ids: [this._entityId],
-            })
-            .catch(() => null)
-        : null;
+      const logbookRequest = causesAvailable ? this._requestLogbook(chunks[i]) : null;
       const result = await this._hass.callWS({
         type: "history/history_during_period",
         start_time: chunks[i].start,
@@ -678,13 +672,38 @@ class ActivityExporterPanel extends HTMLElement {
 
     const records = attachCauses(normaliseRecords(collected), entries);
     this._causesUnavailable = !causesAvailable;
-    if (causesAvailable) {
-      this._cacheKey = key;
-      this._cacheRecords = records;
-    } else {
-      this._invalidateCache();
-    }
+    this._cacheKey = key;
+    this._cacheRecords = records;
+    this._cacheCausesUnavailable = !causesAvailable;
     return records;
+  }
+
+  /**
+   * Request one chunk's logbook entries, resolving to null when the request fails.
+   */
+  _requestLogbook(chunk) {
+    return this._hass
+      .callWS({
+        type: "logbook/get_events",
+        start_time: chunk.start,
+        end_time: chunk.end,
+        entity_ids: [this._entityId],
+      })
+      .catch(() => null);
+  }
+
+  /**
+   * Fetch the logbook again for cached records that are missing their causes, and attach them if every chunk succeeds.
+   */
+  async _retryCauses(chunks) {
+    let entries = [];
+    for (const chunk of chunks) {
+      const logbook = await this._requestLogbook(chunk);
+      if (logbook === null) return;
+      entries = entries.concat(parseLogbookEntries(logbook, this._entityId));
+    }
+    this._cacheRecords = attachCauses(this._cacheRecords, entries);
+    this._cacheCausesUnavailable = false;
   }
 
   _downloadFile(filename, content, mime) {
