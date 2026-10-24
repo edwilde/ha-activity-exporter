@@ -3,11 +3,13 @@ import assert from "node:assert/strict";
 
 import {
   PRESET_DAYS,
+  attachCauses,
   buildFilename,
   buildColumns,
   buildJsonPayload,
   chunkRangeByDay,
   computeRange,
+  describeCause,
   filterRepeats,
   flattenAttributes,
   formatDateForFilename,
@@ -15,10 +17,12 @@ import {
   metadataKeys,
   normaliseRecords,
   parseHistoryRecords,
+  parseLogbookEntries,
   sanitizeFilename,
   secondsSincePrevious,
   toCsv,
   toJson,
+  userNamesFromStates,
   wallClockToEpochMs,
 } from "../../custom_components/ha_activity_exporter/frontend/exporter-core.js";
 
@@ -958,4 +962,297 @@ test("toJson: includes the entity block and derived values", () => {
   const parsed = JSON.parse(toJson(JSON_META, bedsideRecords(), "UTC"));
   assert.equal(parsed.entity.domain, "light");
   assert.equal(parsed.records[1].derived.state_changed, false);
+});
+
+// --- causes ---------------------------------------------------------------
+
+const SCRIPT_CAUSE = {
+  context_entity_id: "script.weekend_sunrise",
+  context_name: "Weekend sunrise",
+  context_event_type: "script_started",
+  context_domain: "script",
+};
+
+/** One logbook entry for x.y, as Home Assistant sends it. */
+function logbookEntry(extra = {}) {
+  return { when: BASE, state: "on", entity_id: "x.y", ...extra };
+}
+
+// Checks only value-change entries for the entity with a numeric time are kept, with their cause fields.
+test("parseLogbookEntries: keeps entries for the entity that have a state and a numeric time", () => {
+  const result = [
+    logbookEntry(SCRIPT_CAUSE),
+    { when: BASE + 5, entity_id: "x.y", message: "custom message" },
+    logbookEntry({ entity_id: "other.thing", when: BASE + 6 }),
+    logbookEntry({ when: "soon" }),
+    logbookEntry({ when: BASE + 7, state: "off", context_user_id: "abc123" }),
+    null,
+  ];
+  assert.deepEqual(parseLogbookEntries(result, "x.y"), [
+    { whenMs: BASE * 1000, state: "on", cause: SCRIPT_CAUSE },
+    { whenMs: (BASE + 7) * 1000, state: "off", cause: { context_user_id: "abc123" } },
+  ]);
+});
+
+// Checks a result that is not a list gives no entries.
+test("parseLogbookEntries: a missing or non-list result gives no entries", () => {
+  assert.deepEqual(parseLogbookEntries(undefined, "x.y"), []);
+  assert.deepEqual(parseLogbookEntries({ when: BASE }, "x.y"), []);
+});
+
+// Checks an entry with no cause fields still parses, with an empty cause.
+test("parseLogbookEntries: an entry with no cause fields has an empty cause", () => {
+  assert.deepEqual(parseLogbookEntries([logbookEntry()], "x.y"), [
+    { whenMs: BASE * 1000, state: "on", cause: {} },
+  ]);
+});
+
+// Checks the value-change row gets the cause while the settings-only rows get none.
+test("attachCauses: an on row matches a logbook entry by time and a settings-only row never gets a cause", () => {
+  const records = bedsideRecords();
+  const entries = parseLogbookEntries([logbookEntry(SCRIPT_CAUSE)], "x.y");
+  const result = attachCauses(records, entries);
+  assert.deepEqual(result[0].cause, SCRIPT_CAUSE);
+  assert.equal("cause" in result[1], false);
+  assert.equal("cause" in result[2], false);
+  assert.equal(result[0].state, "on");
+  assert.deepEqual(result[0].attributes, records[0].attributes);
+});
+
+// Checks attachCauses returns new objects and leaves its input untouched.
+test("attachCauses: returns new record objects without changing the input", () => {
+  const records = bedsideRecords();
+  const result = attachCauses(records, parseLogbookEntries([logbookEntry(SCRIPT_CAUSE)], "x.y"));
+  assert.notEqual(result[0], records[0]);
+  assert.equal("cause" in records[0], false);
+});
+
+// Checks the one millisecond tolerance edge, and that five milliseconds is too far.
+test("attachCauses: matches within 1 ms and not 5 ms away", () => {
+  const near = attachCauses(bedsideRecords(), parseLogbookEntries([logbookEntry({ ...SCRIPT_CAUSE, when: BASE + 0.001 })], "x.y"));
+  assert.deepEqual(near[0].cause, SCRIPT_CAUSE);
+  const far = attachCauses(bedsideRecords(), parseLogbookEntries([logbookEntry({ ...SCRIPT_CAUSE, when: BASE + 0.005 })], "x.y"));
+  assert.equal("cause" in far[0], false);
+});
+
+// Checks an entry whose value differs from the row at that time does not match.
+test("attachCauses: a different value at the same time does not match", () => {
+  const result = attachCauses(bedsideRecords(), parseLogbookEntries([logbookEntry({ ...SCRIPT_CAUSE, state: "off" })], "x.y"));
+  assert.equal("cause" in result[0], false);
+});
+
+// Checks one entry is given to the nearer of two close rows, not both.
+test("attachCauses: the nearest row wins and the farther one gets no cause", () => {
+  const records = recordsFrom([
+    { s: "on", lu: BASE },
+    { s: "on", lu: BASE + 0.0004, a: { brightness: 5 } },
+  ]);
+  const result = attachCauses(records, parseLogbookEntries([logbookEntry({ ...SCRIPT_CAUSE, when: BASE + 0.0003 })], "x.y"));
+  assert.equal("cause" in result[0], false);
+  assert.deepEqual(result[1].cause, SCRIPT_CAUSE);
+});
+
+// Checks a record that already has a cause keeps it when a second entry matches the same moment.
+test("attachCauses: a record takes only the first entry that matches it", () => {
+  const entries = parseLogbookEntries(
+    [logbookEntry(SCRIPT_CAUSE), logbookEntry({ context_domain: "light", context_service: "turn_on" })],
+    "x.y"
+  );
+  const result = attachCauses(bedsideRecords(), entries);
+  assert.deepEqual(result[0].cause, SCRIPT_CAUSE);
+});
+
+// Checks an entry equally far from two rows goes to the earlier one.
+test("attachCauses: a tie between two rows goes to the earlier row", () => {
+  const records = recordsFrom([
+    { s: "on", lu: BASE },
+    { s: "on", lu: BASE + 0.002, a: { brightness: 5 } },
+  ]);
+  const result = attachCauses(records, parseLogbookEntries([logbookEntry({ ...SCRIPT_CAUSE, when: BASE + 0.001 })], "x.y"));
+  assert.deepEqual(result[0].cause, SCRIPT_CAUSE);
+  assert.equal("cause" in result[1], false);
+});
+
+// Checks entries given out of order are still matched, in time order.
+test("attachCauses: entries given newest-first still match their rows", () => {
+  const records = recordsFrom([
+    { s: "on", lu: BASE },
+    { s: "off", lu: BASE + 10 },
+  ]);
+  const entries = parseLogbookEntries(
+    [
+      logbookEntry({ when: BASE + 10, state: "off", context_domain: "light", context_service: "turn_off" }),
+      logbookEntry(SCRIPT_CAUSE),
+    ],
+    "x.y"
+  );
+  const result = attachCauses(records, entries);
+  assert.deepEqual(result[0].cause, SCRIPT_CAUSE);
+  assert.deepEqual(result[1].cause, { context_domain: "light", context_service: "turn_off" });
+});
+
+// Checks competing entries are handled in time order, so the earlier moment wins a shared row.
+test("attachCauses: of two entries for one row the earlier moment wins whatever the input order", () => {
+  const entries = parseLogbookEntries(
+    [
+      logbookEntry({ when: BASE + 0.0008, context_user_id: "later" }),
+      logbookEntry({ when: BASE, context_user_id: "earlier" }),
+    ],
+    "x.y"
+  );
+  const result = attachCauses(recordsFrom([{ s: "on", lu: BASE }]), entries);
+  assert.deepEqual(result[0].cause, { context_user_id: "earlier" });
+});
+
+// Checks 50,000 records and entries are matched exactly and quickly.
+test("attachCauses: matches 50,000 records against 50,000 entries exactly and quickly", () => {
+  const COUNT = 50000;
+  const rows = [];
+  const logbook = [];
+  for (let i = 0; i < COUNT; i++) {
+    rows.push({ s: i % 2 ? "off" : "on", lu: BASE + i });
+    if (i % 2 === 0) logbook.push(logbookEntry({ when: BASE + i, state: "on", context_user_id: `user-${i}` }));
+    else logbook.push(logbookEntry({ when: BASE + i + 0.005, state: "off", context_user_id: `late-${i}` }));
+  }
+  const records = recordsFrom(rows);
+  const entries = parseLogbookEntries(logbook, "x.y");
+  const started = performance.now();
+  const result = attachCauses(records, entries);
+  const elapsed = performance.now() - started;
+  assert.equal(result.length, COUNT);
+  assert.deepEqual(result[0].cause, { context_user_id: "user-0" });
+  assert.deepEqual(result[24998].cause, { context_user_id: "user-24998" });
+  assert.deepEqual(result[COUNT - 2].cause, { context_user_id: `user-${COUNT - 2}` });
+  assert.equal("cause" in result[1], false);
+  assert.equal("cause" in result[25001], false);
+  assert.equal(result.filter((r) => "cause" in r).length, COUNT / 2);
+  assert.ok(elapsed < 2000, `took ${elapsed}ms`);
+});
+
+// Checks an entry with no cause fields attaches nothing.
+test("attachCauses: an entry with no cause fields leaves the record without a cause", () => {
+  const result = attachCauses(bedsideRecords(), parseLogbookEntries([logbookEntry()], "x.y"));
+  assert.equal("cause" in result[0], false);
+});
+
+// Checks a script-triggered cause reads as the script and its name.
+test("describeCause: a script cause reads the script entity and its name", () => {
+  assert.equal(describeCause(SCRIPT_CAUSE), "script.weekend_sunrise (Weekend sunrise)");
+});
+
+// Checks the entity alone is used when there is no name.
+test("describeCause: an entity with no name reads just the entity", () => {
+  assert.equal(describeCause({ context_entity_id: "automation.porch" }), "automation.porch");
+});
+
+// Checks a service-only cause reads as domain.service.
+test("describeCause: a service-only cause reads the domain and service", () => {
+  assert.equal(describeCause({ context_domain: "light", context_service: "turn_on" }), "light.turn_on");
+});
+
+// Checks the source and message are used when no entity or service is named.
+test("describeCause: falls back to the source and message", () => {
+  assert.equal(
+    describeCause({ context_source: "state of sun.sun", context_message: "triggered by sun" }),
+    "state of sun.sun: triggered by sun"
+  );
+  assert.equal(describeCause({ context_message: "triggered by sun" }), "triggered by sun");
+});
+
+// Checks a user-only cause reads as the user id.
+test("describeCause: a user-only cause reads the user id", () => {
+  assert.equal(describeCause({ context_user_id: "abc123" }), "user abc123");
+});
+
+// Checks the entity wins over the service, and a cause with nothing usable reads blank.
+test("describeCause: the entity wins over the service and nothing usable is blank", () => {
+  assert.equal(describeCause({ ...SCRIPT_CAUSE, context_service: "turn_on" }), "script.weekend_sunrise (Weekend sunrise)");
+  assert.equal(describeCause({ context_event_type: "call_service" }), "");
+  assert.equal(describeCause(undefined), "");
+});
+
+// Checks a user-only cause reads as the person's name when the id is known.
+test("describeCause: a user-only cause reads the person's name when known", () => {
+  assert.equal(describeCause({ context_user_id: "abc123" }, { abc123: "Sam" }), "Sam");
+});
+
+// Checks an unknown user id keeps the id text.
+test("describeCause: a user-only cause keeps the id when the person is not in the names", () => {
+  assert.equal(describeCause({ context_user_id: "abc123" }, { other: "Sam" }), "user abc123");
+});
+
+// Checks a script cause is not replaced by a name even when the user is known.
+test("describeCause: the names are only used for a user-only cause", () => {
+  assert.equal(
+    describeCause({ ...SCRIPT_CAUSE, context_user_id: "abc123" }, { abc123: "Sam" }),
+    "script.weekend_sunrise (Weekend sunrise)"
+  );
+});
+
+// Checks person entries become an id to name map with the documented fallbacks.
+test("userNamesFromStates: maps user ids to friendly names, falling back to the object id", () => {
+  const states = {
+    "person.sam": { attributes: { user_id: "u1", friendly_name: "Sam Smith" } },
+    "person.alex": { attributes: { user_id: "u2" } },
+    "person.guest": { attributes: { friendly_name: "Guest" } },
+    "light.bedside": { attributes: { user_id: "u3", friendly_name: "Bedside" } },
+  };
+  assert.deepEqual(userNamesFromStates(states), { u1: "Sam Smith", u2: "alex" });
+});
+
+// Checks missing states give an empty map.
+test("userNamesFromStates: returns an empty map when there are no states", () => {
+  assert.deepEqual(userNamesFromStates(undefined), {});
+});
+
+// Checks the CSV shows the person's name for a user-only cause.
+test("toCsv: split layout names the person behind a user-only cause", () => {
+  const records = attachCauses(bedsideRecords(), parseLogbookEntries([logbookEntry({ context_user_id: "u1" })], "x.y"));
+  const rows = toCsv(records, "UTC", { userNames: { u1: "Sam Smith" } }).split("\r\n");
+  assert.equal(rows[1], "2026-01-15T00:00:00+00:00,on,,3,1.2,hs,27.5,63.2,255,150,100,0.5,0.4,Sam Smith,");
+});
+
+/** Bedside rows with the first row caused by the script. */
+function causedBedsideRecords() {
+  return attachCauses(bedsideRecords(), parseLogbookEntries([logbookEntry(SCRIPT_CAUSE)], "x.y"));
+}
+
+// Checks the split CSV adds changed_by before details with the cause on the matched row only.
+test("toCsv: split layout adds a changed_by column before details when a row has a cause", () => {
+  const rows = toCsv(causedBedsideRecords(), "UTC").split("\r\n");
+  assert.equal(
+    rows[0],
+    "timestamp,value,seconds_since_previous,brightness,brightness_percent,color_mode,hue,saturation,red,green,blue,x,y,changed_by,details"
+  );
+  assert.equal(rows[1], "2026-01-15T00:00:00+00:00,on,,3,1.2,hs,27.5,63.2,255,150,100,0.5,0.4,script.weekend_sunrise (Weekend sunrise),");
+  assert.equal(rows[2], "2026-01-15T00:00:30+00:00,on,30,20,7.8,hs,28,63.2,255,152,100,0.5,0.4,,");
+  assert.equal(rows[3], "2026-01-15T00:01:00+00:00,on,30.25,255,100,hs,30,70,255,170,76,0.45,0.41,,");
+});
+
+// Checks no causes means no changed_by column.
+test("toCsv: split layout has no changed_by column when no row has a cause", () => {
+  assert.equal(toCsv(bedsideRecords(), "UTC").split("\r\n")[0].includes("changed_by"), false);
+});
+
+// Checks a cause with nothing to describe does not add the column.
+test("toCsv: split layout has no changed_by column when no cause can be described", () => {
+  const records = attachCauses(bedsideRecords(), parseLogbookEntries([logbookEntry({ context_event_type: "call_service" })], "x.y"));
+  assert.deepEqual(records[0].cause, { context_event_type: "call_service" });
+  assert.equal(toCsv(records, "UTC").split("\r\n")[0].includes("changed_by"), false);
+});
+
+// Checks the legacy layout never gets a changed_by column.
+test("toCsv: legacy layout has no changed_by column even when a row has a cause", () => {
+  const rows = toCsv(causedBedsideRecords(), "UTC", { splitColumns: false }).split("\r\n");
+  assert.equal(rows[0], "timestamp,value,details");
+  assert.equal(rows[1].startsWith("2026-01-15T00:00:00+00:00,on,"), true);
+  assert.equal(rows[1].includes("script.weekend_sunrise"), false);
+});
+
+// Checks the JSON gains the raw cause on the matched record only.
+test("buildJsonPayload: a matched record carries its raw cause and others carry none", () => {
+  const payload = buildJsonPayload(JSON_META, causedBedsideRecords(), "UTC");
+  assert.deepEqual(payload.records[0].cause, SCRIPT_CAUSE);
+  assert.equal("cause" in payload.records[1], false);
+  assert.equal("cause" in payload.records[2], false);
 });

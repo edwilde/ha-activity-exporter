@@ -13,14 +13,17 @@
  */
 
 import {
+  attachCauses,
   buildFilename,
   chunkRangeByDay,
   computeRange,
   filterRepeats,
   normaliseRecords,
   parseHistoryRecords,
+  parseLogbookEntries,
   toCsv,
   toJson,
+  userNamesFromStates,
 } from "./exporter-core.js";
 
 // Chip labels; the actual day counts live in exporter-core.js (PRESET_DAYS).
@@ -158,6 +161,7 @@ class ActivityExporterPanel extends HTMLElement {
     // format or toggling "skip repeats" or "own column" never refetches.
     this._cacheKey = null;
     this._cacheRecords = null;
+    this._causesUnavailable = false;
 
     this._busy = false;
   }
@@ -561,7 +565,10 @@ class ActivityExporterPanel extends HTMLElement {
     let mime;
     let ext;
     if (format === "csv") {
-      content = toCsv(finalRecords, timeZone, { splitColumns: this._splitColumns });
+      content = toCsv(finalRecords, timeZone, {
+        splitColumns: this._splitColumns,
+        userNames: userNamesFromStates(this._hass.states),
+      });
       mime = "text/csv;charset=utf-8";
       ext = "csv";
     } else {
@@ -585,19 +592,23 @@ class ActivityExporterPanel extends HTMLElement {
     this._downloadFile(filename, content, mime);
 
     const kind = finalRecords.length > LARGE_RESULT_THRESHOLD ? "warn" : "success";
+    const noCauses = this._causesUnavailable
+      ? " It doesn't say what caused each change, because that information wasn't available this time."
+      : "";
     const big =
       kind === "warn"
         ? " That's a lot of rows — if your spreadsheet struggles, try a shorter period or turn on “Skip repeats”."
         : "";
     this._showStatus(
       kind,
-      `Downloaded ${finalRecords.length.toLocaleString()} row${finalRecords.length === 1 ? "" : "s"} as ${filename}.${big}`
+      `Downloaded ${finalRecords.length.toLocaleString()} row${finalRecords.length === 1 ? "" : "s"} as ${filename}.${big}${noCauses}`
     );
   }
 
   async _loadRecords(startMs, endMs) {
     const key = `${this._entityId}|${startMs}|${endMs}`;
     if (this._cacheKey === key && this._cacheRecords) {
+      this._causesUnavailable = false;
       return this._cacheRecords;
     }
 
@@ -607,7 +618,20 @@ class ActivityExporterPanel extends HTMLElement {
 
     this._setProgress(0, "Gathering history… 0%");
     let collected = [];
+    let entries = [];
+    let causesAvailable = true;
     for (let i = 0; i < chunks.length; i++) {
+      // Causes are optional: the first failed logbook request turns them off for this export.
+      const logbookRequest = causesAvailable
+        ? this._hass
+            .callWS({
+              type: "logbook/get_events",
+              start_time: chunks[i].start,
+              end_time: chunks[i].end,
+              entity_ids: [this._entityId],
+            })
+            .catch(() => null)
+        : null;
       const result = await this._hass.callWS({
         type: "history/history_during_period",
         start_time: chunks[i].start,
@@ -621,13 +645,27 @@ class ActivityExporterPanel extends HTMLElement {
         no_attributes: false,
       });
       collected = collected.concat(parseHistoryRecords(result, this._entityId));
+      if (logbookRequest) {
+        const logbook = await logbookRequest;
+        if (logbook === null) {
+          causesAvailable = false;
+          entries = [];
+        } else {
+          entries = entries.concat(parseLogbookEntries(logbook, this._entityId));
+        }
+      }
       const percent = Math.round(((i + 1) / chunks.length) * 100);
       this._setProgress(percent, `Gathering history… ${percent}%`);
     }
 
-    const records = normaliseRecords(collected);
-    this._cacheKey = key;
-    this._cacheRecords = records;
+    const records = attachCauses(normaliseRecords(collected), entries);
+    this._causesUnavailable = !causesAvailable;
+    if (causesAvailable) {
+      this._cacheKey = key;
+      this._cacheRecords = records;
+    } else {
+      this._invalidateCache();
+    }
     return records;
   }
 

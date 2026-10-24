@@ -412,6 +412,137 @@ export function buildColumns(records, metadata) {
   return [...light, ...rest];
 }
 
+// --- causes ---------------------------------------------------------------
+
+/** How far apart (ms) a logbook entry and a history row may be and still match. */
+const CAUSE_MATCH_MS = 1;
+
+/** Logbook fields that say what caused a change. */
+const CAUSE_FIELDS = [
+  "context_user_id",
+  "context_event_type",
+  "context_domain",
+  "context_service",
+  "context_entity_id",
+  "context_state",
+  "context_name",
+  "context_message",
+  "context_source",
+];
+
+/**
+ * Convert logbook entries for one entity into value-change entries with their
+ * cause fields, leaving out entries with no value or no numeric time.
+ *
+ * @param {any[]} result result list from the logbook/get_events WS command
+ * @param {string} entityId entity whose entries to extract
+ * @returns {{whenMs: number, state: string, cause: Record<string, any>}[]}
+ */
+export function parseLogbookEntries(result, entityId) {
+  if (!Array.isArray(result)) return [];
+  const entries = [];
+  for (const entry of result) {
+    if (!entry || typeof entry !== "object") continue;
+    if (entry.entity_id !== entityId) continue;
+    if (typeof entry.when !== "number" || entry.state == null) continue;
+    const cause = {};
+    for (const field of CAUSE_FIELDS) {
+      if (entry[field] != null && entry[field] !== "") cause[field] = entry[field];
+    }
+    entries.push({ whenMs: entry.when * 1000, state: String(entry.state), cause });
+  }
+  return entries;
+}
+
+/**
+ * Find the index of the first record whose timestamp is at least `ms`.
+ *
+ * @param {{timestampMs: number}[]} records oldest-first
+ * @param {number} ms
+ * @returns {number} records.length when every record is earlier
+ */
+function firstRecordFrom(records, ms) {
+  let low = 0;
+  let high = records.length;
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    if (records[mid].timestampMs < ms) low = mid + 1;
+    else high = mid;
+  }
+  return low;
+}
+
+/**
+ * Give each record the cause of the nearest logbook entry with the same value at the same moment.
+ *
+ * @param {{timestampMs: number, state: string}[]} records oldest-first
+ * @param {{whenMs: number, state: string, cause: Record<string, any>}[]} entries
+ * @returns {object[]} new record objects, with `cause` set on the matched ones
+ */
+export function attachCauses(records, entries) {
+  const out = records.map((r) => ({ ...r }));
+  const taken = new Set();
+  const margin = CAUSE_MATCH_MS + 0.001;
+  const ordered = [...entries].sort((a, b) => a.whenMs - b.whenMs);
+  for (const entry of ordered) {
+    if (!Object.keys(entry.cause).length) continue;
+    let best = -1;
+    let bestGap = Infinity;
+    for (let index = firstRecordFrom(out, entry.whenMs - margin); index < out.length; index++) {
+      const r = out[index];
+      if (r.timestampMs > entry.whenMs + margin) break;
+      if (taken.has(index) || r.state !== entry.state) continue;
+      const gap = Math.round(Math.abs(r.timestampMs - entry.whenMs) * 1000) / 1000;
+      if (gap <= CAUSE_MATCH_MS && gap < bestGap) {
+        best = index;
+        bestGap = gap;
+      }
+    }
+    if (best !== -1) {
+      out[best].cause = entry.cause;
+      taken.add(best);
+    }
+  }
+  return out;
+}
+
+/**
+ * Build a map of user id to display name from the person entries in a states object.
+ *
+ * @param {Record<string, {attributes?: Record<string, any>}>} [states]
+ * @returns {Record<string, string>}
+ */
+export function userNamesFromStates(states) {
+  const names = {};
+  for (const [entityId, state] of Object.entries(states || {})) {
+    if (!entityId.startsWith("person.")) continue;
+    const userId = state?.attributes?.user_id;
+    if (!userId) continue;
+    names[userId] = state.attributes.friendly_name || entityId.slice("person.".length);
+  }
+  return names;
+}
+
+/**
+ * Turn a cause into short text: the entity that did it, else the service that
+ * was called, else the source or message, else the user.
+ *
+ * @param {Record<string, any>} [cause]
+ * @param {Record<string, string>} [userNames] user id to display name
+ * @returns {string} empty when nothing applies
+ */
+export function describeCause(cause, userNames) {
+  const c = cause || {};
+  if (c.context_entity_id) {
+    return c.context_name ? `${c.context_entity_id} (${c.context_name})` : String(c.context_entity_id);
+  }
+  if (c.context_domain && c.context_service) return `${c.context_domain}.${c.context_service}`;
+  const text = [c.context_source, c.context_message].filter(Boolean).join(": ");
+  if (text) return text;
+  if (!c.context_user_id) return "";
+  return userNames?.[c.context_user_id] || `user ${c.context_user_id}`;
+}
+
 // --- formatting -----------------------------------------------------------
 
 /**
@@ -486,11 +617,11 @@ export function secondsSincePrevious(records, index) {
 /**
  * Build CSV text with CRLF line endings, one column per setting unless splitColumns is false.
  *
- * @param {{timestampMs:number, state:string, attributes:object}[]} records oldest-first
+ * @param {{timestampMs:number, state:string, attributes:object, cause?:object}[]} records oldest-first
  * @param {string} [timeZone]
- * @param {{splitColumns?: boolean}} [options]
+ * @param {{splitColumns?: boolean, userNames?: Record<string, string>}} [options]
  */
-export function toCsv(records, timeZone, { splitColumns = true } = {}) {
+export function toCsv(records, timeZone, { splitColumns = true, userNames } = {}) {
   if (!splitColumns) {
     const lines = ["timestamp,value,details"];
     for (const r of records) {
@@ -506,8 +637,18 @@ export function toCsv(records, timeZone, { splitColumns = true } = {}) {
   }
   const metadata = metadataKeys(records);
   const columns = buildColumns(records, metadata);
+  const showCauses = records.some((r) => describeCause(r.cause, userNames) !== "");
   const lines = [
-    ["timestamp", "value", "seconds_since_previous", ...columns, "details"].map(csvEscape).join(","),
+    [
+      "timestamp",
+      "value",
+      "seconds_since_previous",
+      ...columns,
+      ...(showCauses ? ["changed_by"] : []),
+      "details",
+    ]
+      .map(csvEscape)
+      .join(","),
   ];
   records.forEach((r, index) => {
     const { cells, leftovers } = flattenAttributes(r.attributes, metadata);
@@ -518,6 +659,7 @@ export function toCsv(records, timeZone, { splitColumns = true } = {}) {
         r.state,
         secondsSincePrevious(records, index),
         ...columns.map((name) => cells[name]),
+        ...(showCauses ? [describeCause(r.cause, userNames)] : []),
         details,
       ]
         .map(csvEscape)
@@ -608,6 +750,7 @@ export function buildJsonPayload(meta, records, timeZone) {
       state: r.state,
       attributes: r.attributes || {},
       derived: deriveValues(records, index),
+      ...(r.cause ? { cause: r.cause } : {}),
     })),
   };
 }
