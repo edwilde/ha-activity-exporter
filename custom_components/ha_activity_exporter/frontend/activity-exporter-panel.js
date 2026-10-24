@@ -635,7 +635,7 @@ class ActivityExporterPanel extends HTMLElement {
             entity_ids: [this._entityId],
           });
           entries = entries.concat(parseLogbookEntries(logbook, this._entityId));
-        } catch (err) {
+        } catch {
           causesAvailable = false;
           entries = [];
         }

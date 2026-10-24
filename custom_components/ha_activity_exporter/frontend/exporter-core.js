@@ -455,28 +455,51 @@ export function parseLogbookEntries(result, entityId) {
 }
 
 /**
- * Give each record the cause of the logbook entry with the same value recorded
- * at the same moment. Each entry goes to the nearest matching record only.
+ * Find the index of the first record whose timestamp is at least `ms`.
  *
- * @param {{timestampMs: number, state: string}[]} records
+ * @param {{timestampMs: number}[]} records oldest-first
+ * @param {number} ms
+ * @returns {number} records.length when every record is earlier
+ */
+function firstRecordFrom(records, ms) {
+  let low = 0;
+  let high = records.length;
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    if (records[mid].timestampMs < ms) low = mid + 1;
+    else high = mid;
+  }
+  return low;
+}
+
+/**
+ * Give each record the cause of the logbook entry with the same value recorded
+ * at the same moment. Each entry goes to the nearest matching record only, the
+ * earlier one on a tie, and a record keeps the first entry that matched it.
+ *
+ * @param {{timestampMs: number, state: string}[]} records oldest-first
  * @param {{whenMs: number, state: string, cause: Record<string, any>}[]} entries
  * @returns {object[]} new record objects, with `cause` set on the matched ones
  */
 export function attachCauses(records, entries) {
   const out = records.map((r) => ({ ...r }));
   const taken = new Set();
-  for (const entry of entries) {
+  const margin = CAUSE_MATCH_MS + 0.001;
+  const ordered = [...entries].sort((a, b) => a.whenMs - b.whenMs);
+  for (const entry of ordered) {
     if (!Object.keys(entry.cause).length) continue;
     let best = -1;
     let bestGap = Infinity;
-    out.forEach((r, index) => {
-      if (taken.has(index) || r.state !== entry.state) return;
+    for (let index = firstRecordFrom(out, entry.whenMs - margin); index < out.length; index++) {
+      const r = out[index];
+      if (r.timestampMs > entry.whenMs + margin) break;
+      if (taken.has(index) || r.state !== entry.state) continue;
       const gap = Math.round(Math.abs(r.timestampMs - entry.whenMs) * 1000) / 1000;
       if (gap <= CAUSE_MATCH_MS && gap < bestGap) {
         best = index;
         bestGap = gap;
       }
-    });
+    }
     if (best !== -1) {
       out[best].cause = entry.cause;
       taken.add(best);

@@ -1040,8 +1040,8 @@ test("attachCauses: a different value at the same time does not match", () => {
   assert.equal("cause" in result[0], false);
 });
 
-// Checks one entry is given to the nearest of two close rows, not both.
-test("attachCauses: an entry matches at most one record", () => {
+// Checks one entry is given to the nearer of two close rows, not both.
+test("attachCauses: the nearest row wins and the farther one gets no cause", () => {
   const records = recordsFrom([
     { s: "on", lu: BASE },
     { s: "on", lu: BASE + 0.0004, a: { brightness: 5 } },
@@ -1059,6 +1059,73 @@ test("attachCauses: a record takes only the first entry that matches it", () => 
   );
   const result = attachCauses(bedsideRecords(), entries);
   assert.deepEqual(result[0].cause, SCRIPT_CAUSE);
+});
+
+// Checks an entry equally far from two rows goes to the earlier one.
+test("attachCauses: a tie between two rows goes to the earlier row", () => {
+  const records = recordsFrom([
+    { s: "on", lu: BASE },
+    { s: "on", lu: BASE + 0.002, a: { brightness: 5 } },
+  ]);
+  const result = attachCauses(records, parseLogbookEntries([logbookEntry({ ...SCRIPT_CAUSE, when: BASE + 0.001 })], "x.y"));
+  assert.deepEqual(result[0].cause, SCRIPT_CAUSE);
+  assert.equal("cause" in result[1], false);
+});
+
+// Checks entries given out of order are still matched, in time order.
+test("attachCauses: entries given newest-first still match their rows", () => {
+  const records = recordsFrom([
+    { s: "on", lu: BASE },
+    { s: "off", lu: BASE + 10 },
+  ]);
+  const entries = parseLogbookEntries(
+    [
+      logbookEntry({ when: BASE + 10, state: "off", context_domain: "light", context_service: "turn_off" }),
+      logbookEntry(SCRIPT_CAUSE),
+    ],
+    "x.y"
+  );
+  const result = attachCauses(records, entries);
+  assert.deepEqual(result[0].cause, SCRIPT_CAUSE);
+  assert.deepEqual(result[1].cause, { context_domain: "light", context_service: "turn_off" });
+});
+
+// Checks competing entries are handled in time order, so the earlier moment wins a shared row.
+test("attachCauses: of two entries for one row the earlier moment wins whatever the input order", () => {
+  const entries = parseLogbookEntries(
+    [
+      logbookEntry({ when: BASE + 0.0008, context_user_id: "later" }),
+      logbookEntry({ when: BASE, context_user_id: "earlier" }),
+    ],
+    "x.y"
+  );
+  const result = attachCauses(recordsFrom([{ s: "on", lu: BASE }]), entries);
+  assert.deepEqual(result[0].cause, { context_user_id: "earlier" });
+});
+
+// Checks 50,000 records and entries are matched exactly and quickly.
+test("attachCauses: matches 50,000 records against 50,000 entries exactly and quickly", () => {
+  const COUNT = 50000;
+  const rows = [];
+  const logbook = [];
+  for (let i = 0; i < COUNT; i++) {
+    rows.push({ s: i % 2 ? "off" : "on", lu: BASE + i });
+    if (i % 2 === 0) logbook.push(logbookEntry({ when: BASE + i, state: "on", context_user_id: `user-${i}` }));
+    else logbook.push(logbookEntry({ when: BASE + i + 0.005, state: "off", context_user_id: `late-${i}` }));
+  }
+  const records = recordsFrom(rows);
+  const entries = parseLogbookEntries(logbook, "x.y");
+  const started = performance.now();
+  const result = attachCauses(records, entries);
+  const elapsed = performance.now() - started;
+  assert.equal(result.length, COUNT);
+  assert.deepEqual(result[0].cause, { context_user_id: "user-0" });
+  assert.deepEqual(result[24998].cause, { context_user_id: "user-24998" });
+  assert.deepEqual(result[COUNT - 2].cause, { context_user_id: `user-${COUNT - 2}` });
+  assert.equal("cause" in result[1], false);
+  assert.equal("cause" in result[25001], false);
+  assert.equal(result.filter((r) => "cause" in r).length, COUNT / 2);
+  assert.ok(elapsed < 2000, `took ${elapsed}ms`);
 });
 
 // Checks an entry with no cause fields attaches nothing.
