@@ -111,7 +111,7 @@ const STYLES = `
   button.export {
     flex: 1 1 220px;
     padding: 14px 18px;
-    border: none;
+    border: 1px solid transparent;
     border-radius: 10px;
     font: inherit;
     font-size: 1rem;
