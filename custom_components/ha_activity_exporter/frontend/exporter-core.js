@@ -120,22 +120,23 @@ export function chunkRangeByDay(startISO, endISO) {
 
 /**
  * Convert one entity's compressed-state rows into normalised records.
+ * Each row is timed by when it was recorded (lu); lastChangedMs is when its
+ * value last changed (lc, or lu when lc is absent). Rows without lu are skipped.
  *
  * @param {Record<string, any[]>} wsResult result object from the WS command
  * @param {string} entityId entity whose rows to extract
- * @returns {{timestampMs: number, state: string, attributes: object}[]}
+ * @returns {{timestampMs: number, lastChangedMs: number, state: string, attributes: object}[]}
  */
 export function parseHistoryRecords(wsResult, entityId) {
   const rows = (wsResult && wsResult[entityId]) || [];
   const records = [];
   for (const row of rows) {
     if (!row || typeof row !== "object") continue;
-    const lu = typeof row.lu === "number" ? row.lu : undefined;
-    const lc = typeof row.lc === "number" ? row.lc : lu;
-    const whenSec = lc !== undefined ? lc : lu;
-    if (whenSec === undefined) continue;
+    if (typeof row.lu !== "number") continue;
+    const lc = typeof row.lc === "number" ? row.lc : row.lu;
     records.push({
-      timestampMs: whenSec * 1000,
+      timestampMs: row.lu * 1000,
+      lastChangedMs: lc * 1000,
       state: row.s != null ? String(row.s) : "",
       attributes: row.a && typeof row.a === "object" ? row.a : {},
     });
@@ -144,8 +145,24 @@ export function parseHistoryRecords(wsResult, entityId) {
 }
 
 /**
- * Sort records oldest-first and remove exact duplicates (same timestamp + state)
- * that can appear at day-chunk boundaries.
+ * Serialise a value to JSON text with object keys sorted at every depth, so two
+ * values with the same content always give the same string.
+ *
+ * @param {any} value
+ * @returns {string}
+ */
+function stableStringify(value) {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  if (value && typeof value === "object") {
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+/**
+ * Sort records oldest-first and remove exact duplicates (same timestamp, state
+ * and attributes) that can appear at day-chunk boundaries.
  *
  * @param {{timestampMs: number, state: string, attributes: object}[]} records
  */
@@ -154,7 +171,7 @@ export function normaliseRecords(records) {
   const out = [];
   let prevKey;
   for (const r of sorted) {
-    const key = `${r.timestampMs}|${r.state}`;
+    const key = `${r.timestampMs}|${r.state}|${stableStringify(r.attributes || {})}`;
     if (key !== prevKey) {
       out.push(r);
       prevKey = key;
@@ -163,19 +180,39 @@ export function normaliseRecords(records) {
   return out;
 }
 
+/** Attributes that change continuously and do not count as a real change. */
+const VOLATILE_ATTRIBUTES = new Set(["media_position", "media_position_updated_at"]);
+
 /**
- * "Skip repeats" filter: keep a record only when its state VALUE differs from
- * the previously kept record. The first record is always kept as the baseline.
+ * Serialise a record's value and attributes, leaving out the volatile
+ * attributes, so equal strings mean "nothing meaningful changed".
  *
- * @param {{state: string}[]} records assumed oldest-first
+ * @param {{state: string, attributes: object}} record
+ * @returns {string}
  */
-export function filterStateChanges(records) {
+function repeatSignature(record) {
+  const attributes = {};
+  for (const [key, value] of Object.entries(record.attributes || {})) {
+    if (!VOLATILE_ATTRIBUTES.has(key)) attributes[key] = value;
+  }
+  return `${record.state}|${stableStringify(attributes)}`;
+}
+
+/**
+ * "Skip repeats" filter: keep a record only when its value or attributes differ
+ * from the previously kept record, ignoring the volatile attributes. The first
+ * record is always kept as the baseline.
+ *
+ * @param {{state: string, attributes: object}[]} records assumed oldest-first
+ */
+export function filterRepeats(records) {
   const out = [];
-  let prevState;
+  let prevSignature;
   for (const r of records) {
-    if (out.length === 0 || r.state !== prevState) {
+    const signature = repeatSignature(r);
+    if (signature !== prevSignature) {
       out.push(r);
-      prevState = r.state;
+      prevSignature = signature;
     }
   }
   return out;

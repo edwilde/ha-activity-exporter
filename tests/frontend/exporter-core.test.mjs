@@ -7,7 +7,7 @@ import {
   buildJsonPayload,
   chunkRangeByDay,
   computeRange,
-  filterStateChanges,
+  filterRepeats,
   formatDateForFilename,
   formatTimestamp,
   normaliseRecords,
@@ -102,20 +102,54 @@ test("computeRange: presets are anchored to now; custom uses the HA zone", () =>
 
 // --- parseHistoryRecords --------------------------------------------------
 
-test("parseHistoryRecords: maps compressed keys, prefers lc over lu", () => {
+// Checks rows are timed by lu, with lc kept separately as lastChangedMs.
+test("parseHistoryRecords: times rows by lu and keeps lc as lastChangedMs", () => {
   const result = {
     "binary_sensor.front_door": [
       { s: "on", a: { device_class: "door" }, lu: 1768435200, lc: 1768435100 },
-      { s: "off", a: {}, lu: 1768435260 }, // no lc -> uses lu
+      { s: "off", a: {}, lu: 1768435260 }, // no lc -> lastChanged falls back to lu
     ],
   };
   const records = parseHistoryRecords(result, "binary_sensor.front_door");
   assert.equal(records.length, 2);
   assert.equal(records[0].state, "on");
-  assert.equal(records[0].timestampMs, 1768435100 * 1000); // lc wins
+  assert.equal(records[0].timestampMs, 1768435200 * 1000); // lu wins
+  assert.equal(records[0].lastChangedMs, 1768435100 * 1000);
   assert.deepEqual(records[0].attributes, { device_class: "door" });
-  assert.equal(records[1].timestampMs, 1768435260 * 1000); // falls back to lu
+  assert.equal(records[1].timestampMs, 1768435260 * 1000);
+  assert.equal(records[1].lastChangedMs, 1768435260 * 1000); // lc absent -> lu
   assert.deepEqual(records[1].attributes, {});
+});
+
+// Checks a settings ramp sharing one lc yields one distinct-time row per step.
+test("parseHistoryRecords: a brightness ramp with a shared lc keeps distinct timestamps", () => {
+  const T = 1768435000;
+  const rows = [10, 20, 30, 40].map((b, i) => ({
+    s: "on",
+    a: { brightness: b },
+    lu: T + 10 + i,
+    lc: T,
+  }));
+  const records = parseHistoryRecords({ light: rows }, "light");
+  assert.deepEqual(
+    records.map((r) => r.timestampMs),
+    [(T + 10) * 1000, (T + 11) * 1000, (T + 12) * 1000, (T + 13) * 1000]
+  );
+  assert.deepEqual(
+    records.map((r) => r.lastChangedMs),
+    [T * 1000, T * 1000, T * 1000, T * 1000]
+  );
+  assert.equal(normaliseRecords(records).length, 4);
+});
+
+// Checks a row with no numeric lu is skipped even when lc is present.
+test("parseHistoryRecords: skips a row that has lc but no lu", () => {
+  const records = parseHistoryRecords(
+    { e: [{ s: "on", lc: 1000 }, { s: "off", lu: 2000 }] },
+    "e"
+  );
+  assert.equal(records.length, 1);
+  assert.equal(records[0].state, "off");
 });
 
 test("parseHistoryRecords: missing entity or attributes handled", () => {
@@ -170,6 +204,27 @@ test("normaliseRecords: sorts ascending and drops exact boundary duplicates", ()
   );
 });
 
+// Checks two rows sharing a time and state but with different settings both survive.
+test("normaliseRecords: keeps same-time same-value rows whose attributes differ", () => {
+  const out = normaliseRecords([
+    { timestampMs: 1000, state: "on", attributes: { brightness: 10 } },
+    { timestampMs: 1000, state: "on", attributes: { brightness: 20 } },
+  ]);
+  assert.deepEqual(
+    out.map((r) => r.attributes.brightness),
+    [10, 20]
+  );
+});
+
+// Checks attributes that differ only in key order are treated as the same row.
+test("normaliseRecords: drops a duplicate whose attribute keys are in a different order", () => {
+  const out = normaliseRecords([
+    { timestampMs: 1000, state: "on", attributes: { a: 1, b: { x: 1, y: [1, { p: 1, q: 2 }] } } },
+    { timestampMs: 1000, state: "on", attributes: { b: { y: [1, { q: 2, p: 1 }], x: 1 }, a: 1 } },
+  ]);
+  assert.equal(out.length, 1);
+});
+
 test("normaliseRecords: de-dups carried-over state across day chunks (real parse path)", () => {
   const T = 1768435200;
   // Chunk 0 ends with the door "on"; chunk 1's include_start_time_state seed
@@ -181,25 +236,61 @@ test("normaliseRecords: de-dups carried-over state across day chunks (real parse
   assert.equal(merged[0].state, "on");
 });
 
-// --- filterStateChanges ---------------------------------------------------
+// --- filterRepeats --------------------------------------------------------
 
-test("filterStateChanges: keeps baseline and transitions only", () => {
+// Checks every setting step is kept and only an exact repeat is dropped.
+test("filterRepeats: keeps brightness and colour steps and drops exact repeats", () => {
   const input = [
-    { timestampMs: 1, state: "on", attributes: {} },
-    { timestampMs: 2, state: "on", attributes: { brightness: 10 } }, // attr-only -> dropped
-    { timestampMs: 3, state: "off", attributes: {} },
-    { timestampMs: 4, state: "off", attributes: {} }, // dropped
-    { timestampMs: 5, state: "on", attributes: {} },
+    { timestampMs: 1, state: "on", attributes: { brightness: 10, rgb_color: [255, 0, 0] } },
+    { timestampMs: 2, state: "on", attributes: { brightness: 20, rgb_color: [255, 0, 0] } },
+    { timestampMs: 3, state: "on", attributes: { brightness: 20, rgb_color: [255, 0, 0] } }, // exact repeat
+    { timestampMs: 4, state: "on", attributes: { brightness: 20, rgb_color: [0, 255, 0] } },
+    { timestampMs: 5, state: "off", attributes: {} },
+    { timestampMs: 6, state: "off", attributes: {} }, // exact repeat
+    { timestampMs: 7, state: "on", attributes: {} },
   ];
-  const out = filterStateChanges(input);
+  const out = filterRepeats(input);
   assert.deepEqual(
-    out.map((r) => r.state),
-    ["on", "off", "on"]
+    out.map((r) => r.timestampMs),
+    [1, 2, 4, 5, 7]
   );
 });
 
-test("filterStateChanges: empty input -> empty output", () => {
-  assert.deepEqual(filterStateChanges([]), []);
+// Checks a change in media position alone counts as a repeat.
+test("filterRepeats: a media position only change is a repeat", () => {
+  const input = [
+    { timestampMs: 1, state: "playing", attributes: { volume_level: 0.5, media_position: 10, media_position_updated_at: "2026-01-01T00:00:00Z" } },
+    { timestampMs: 2, state: "playing", attributes: { volume_level: 0.5, media_position: 40, media_position_updated_at: "2026-01-01T00:00:30Z" } },
+    { timestampMs: 3, state: "playing", attributes: { volume_level: 0.6, media_position: 70, media_position_updated_at: "2026-01-01T00:01:00Z" } },
+  ];
+  const out = filterRepeats(input);
+  assert.deepEqual(
+    out.map((r) => r.timestampMs),
+    [1, 3]
+  );
+});
+
+// Checks attributes with the same content in a different key order are a repeat.
+test("filterRepeats: key order does not make attributes differ", () => {
+  const input = [
+    { timestampMs: 1, state: "on", attributes: { a: 1, b: { x: 1, y: 2 } } },
+    { timestampMs: 2, state: "on", attributes: { b: { y: 2, x: 1 }, a: 1 } },
+  ];
+  assert.equal(filterRepeats(input).length, 1);
+});
+
+// Checks a state change with identical attributes is kept.
+test("filterRepeats: a value change with identical attributes is kept", () => {
+  const input = [
+    { timestampMs: 1, state: "on", attributes: { brightness: 10 } },
+    { timestampMs: 2, state: "off", attributes: { brightness: 10 } },
+  ];
+  assert.equal(filterRepeats(input).length, 2);
+});
+
+// Checks empty input gives empty output.
+test("filterRepeats: empty input -> empty output", () => {
+  assert.deepEqual(filterRepeats([]), []);
 });
 
 // --- formatTimestamp ------------------------------------------------------

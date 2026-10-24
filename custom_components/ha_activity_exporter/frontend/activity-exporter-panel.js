@@ -16,7 +16,7 @@ import {
   buildFilename,
   chunkRangeByDay,
   computeRange,
-  filterStateChanges,
+  filterRepeats,
   normaliseRecords,
   parseHistoryRecords,
   toCsv,
@@ -537,7 +537,7 @@ class ActivityExporterPanel extends HTMLElement {
       return;
     }
 
-    const finalRecords = this._skipRepeats ? filterStateChanges(records) : records;
+    const finalRecords = this._skipRepeats ? filterRepeats(records) : records;
     const timeZone = this._hass.config?.time_zone;
     const friendlyName = this._hass.states[this._entityId]?.attributes?.friendly_name || null;
 
