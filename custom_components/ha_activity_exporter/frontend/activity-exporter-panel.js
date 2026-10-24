@@ -13,12 +13,14 @@
  */
 
 import {
+  attachCauses,
   buildFilename,
   chunkRangeByDay,
   computeRange,
   filterRepeats,
   normaliseRecords,
   parseHistoryRecords,
+  parseLogbookEntries,
   toCsv,
   toJson,
 } from "./exporter-core.js";
@@ -607,6 +609,8 @@ class ActivityExporterPanel extends HTMLElement {
 
     this._setProgress(0, "Gathering history… 0%");
     let collected = [];
+    let entries = [];
+    let causesAvailable = true;
     for (let i = 0; i < chunks.length; i++) {
       const result = await this._hass.callWS({
         type: "history/history_during_period",
@@ -621,11 +625,26 @@ class ActivityExporterPanel extends HTMLElement {
         no_attributes: false,
       });
       collected = collected.concat(parseHistoryRecords(result, this._entityId));
+      // Causes are optional: the first failed logbook request turns them off for this export.
+      if (causesAvailable) {
+        try {
+          const logbook = await this._hass.callWS({
+            type: "logbook/get_events",
+            start_time: chunks[i].start,
+            end_time: chunks[i].end,
+            entity_ids: [this._entityId],
+          });
+          entries = entries.concat(parseLogbookEntries(logbook, this._entityId));
+        } catch (err) {
+          causesAvailable = false;
+          entries = [];
+        }
+      }
       const percent = Math.round(((i + 1) / chunks.length) * 100);
       this._setProgress(percent, `Gathering history… ${percent}%`);
     }
 
-    const records = normaliseRecords(collected);
+    const records = attachCauses(normaliseRecords(collected), entries);
     this._cacheKey = key;
     this._cacheRecords = records;
     return records;

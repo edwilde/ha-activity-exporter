@@ -65,6 +65,8 @@ timestamp,value,seconds_since_previous,brightness,brightness_percent,color_mode,
 
 With **Give each setting its own column** turned off, the header is `timestamp,value,details` and `details` holds all the extra information as compact JSON.
 
+When Home Assistant knows what caused a change, the spreadsheet gains a `changed_by` column just before `details`. It names the script, automation, action or person behind an on/off style change, for example `script.weekend_sunrise (Weekend sunrise)` or `light.turn_on`. In the JSON file the same information appears as a `cause` entry on that row. The column is left out of the spreadsheet when none of the rows has a cause, and it does not appear when each setting's own column is turned off.
+
 **JSON** - a self-describing wrapper so an LLM has all the context it needs. `entity` describes the device, and each record has a `derived` block with values worked out for you, such as whether the value itself changed and the seconds since the previous row (shown here for two records):
 
 ```json
@@ -154,6 +156,7 @@ a time so you get a real progress bar.
   nothing to export.
 - The whole result is assembled in your browser, so extremely long ranges of a very
   chatty sensor may be slow.
+- `changed_by` is blank for steps that only change a setting (brightness, colour), because Home Assistant only notes what caused a change of value. It is also blank for sensors that report a unit, which Home Assistant leaves out of its activity log.
 
 ## Development & testing
 

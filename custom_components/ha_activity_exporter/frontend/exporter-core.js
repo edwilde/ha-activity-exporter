@@ -412,6 +412,97 @@ export function buildColumns(records, metadata) {
   return [...light, ...rest];
 }
 
+// --- causes ---------------------------------------------------------------
+
+/** How far apart (ms) a logbook entry and a history row may be and still match. */
+const CAUSE_MATCH_MS = 1;
+
+/** Logbook fields that say what caused a change. */
+const CAUSE_FIELDS = [
+  "context_user_id",
+  "context_event_type",
+  "context_domain",
+  "context_service",
+  "context_entity_id",
+  "context_state",
+  "context_name",
+  "context_message",
+  "context_source",
+];
+
+/**
+ * Convert logbook entries for one entity into value-change entries with their
+ * cause fields, leaving out entries with no value or no numeric time.
+ *
+ * @param {any[]} result result list from the logbook/get_events WS command
+ * @param {string} entityId entity whose entries to extract
+ * @returns {{whenMs: number, state: string, cause: Record<string, any>}[]}
+ */
+export function parseLogbookEntries(result, entityId) {
+  if (!Array.isArray(result)) return [];
+  const entries = [];
+  for (const entry of result) {
+    if (!entry || typeof entry !== "object") continue;
+    if (entry.entity_id !== entityId) continue;
+    if (typeof entry.when !== "number" || entry.state == null) continue;
+    const cause = {};
+    for (const field of CAUSE_FIELDS) {
+      if (entry[field] != null && entry[field] !== "") cause[field] = entry[field];
+    }
+    entries.push({ whenMs: entry.when * 1000, state: String(entry.state), cause });
+  }
+  return entries;
+}
+
+/**
+ * Give each record the cause of the logbook entry with the same value recorded
+ * at the same moment. Each entry goes to the nearest matching record only.
+ *
+ * @param {{timestampMs: number, state: string}[]} records
+ * @param {{whenMs: number, state: string, cause: Record<string, any>}[]} entries
+ * @returns {object[]} new record objects, with `cause` set on the matched ones
+ */
+export function attachCauses(records, entries) {
+  const out = records.map((r) => ({ ...r }));
+  const taken = new Set();
+  for (const entry of entries) {
+    if (!Object.keys(entry.cause).length) continue;
+    let best = -1;
+    let bestGap = Infinity;
+    out.forEach((r, index) => {
+      if (taken.has(index) || r.state !== entry.state) return;
+      const gap = Math.round(Math.abs(r.timestampMs - entry.whenMs) * 1000) / 1000;
+      if (gap <= CAUSE_MATCH_MS && gap < bestGap) {
+        best = index;
+        bestGap = gap;
+      }
+    });
+    if (best !== -1) {
+      out[best].cause = entry.cause;
+      taken.add(best);
+    }
+  }
+  return out;
+}
+
+/**
+ * Turn a cause into short text: the entity that did it, else the service that
+ * was called, else the source or message, else the user.
+ *
+ * @param {Record<string, any>} [cause]
+ * @returns {string} empty when nothing applies
+ */
+export function describeCause(cause) {
+  const c = cause || {};
+  if (c.context_entity_id) {
+    return c.context_name ? `${c.context_entity_id} (${c.context_name})` : String(c.context_entity_id);
+  }
+  if (c.context_domain && c.context_service) return `${c.context_domain}.${c.context_service}`;
+  const text = [c.context_source, c.context_message].filter(Boolean).join(": ");
+  if (text) return text;
+  return c.context_user_id ? `user ${c.context_user_id}` : "";
+}
+
 // --- formatting -----------------------------------------------------------
 
 /**
@@ -486,7 +577,7 @@ export function secondsSincePrevious(records, index) {
 /**
  * Build CSV text with CRLF line endings, one column per setting unless splitColumns is false.
  *
- * @param {{timestampMs:number, state:string, attributes:object}[]} records oldest-first
+ * @param {{timestampMs:number, state:string, attributes:object, cause?:object}[]} records oldest-first
  * @param {string} [timeZone]
  * @param {{splitColumns?: boolean}} [options]
  */
@@ -506,8 +597,18 @@ export function toCsv(records, timeZone, { splitColumns = true } = {}) {
   }
   const metadata = metadataKeys(records);
   const columns = buildColumns(records, metadata);
+  const showCauses = records.some((r) => describeCause(r.cause) !== "");
   const lines = [
-    ["timestamp", "value", "seconds_since_previous", ...columns, "details"].map(csvEscape).join(","),
+    [
+      "timestamp",
+      "value",
+      "seconds_since_previous",
+      ...columns,
+      ...(showCauses ? ["changed_by"] : []),
+      "details",
+    ]
+      .map(csvEscape)
+      .join(","),
   ];
   records.forEach((r, index) => {
     const { cells, leftovers } = flattenAttributes(r.attributes, metadata);
@@ -518,6 +619,7 @@ export function toCsv(records, timeZone, { splitColumns = true } = {}) {
         r.state,
         secondsSincePrevious(records, index),
         ...columns.map((name) => cells[name]),
+        ...(showCauses ? [describeCause(r.cause)] : []),
         details,
       ]
         .map(csvEscape)
@@ -608,6 +710,7 @@ export function buildJsonPayload(meta, records, timeZone) {
       state: r.state,
       attributes: r.attributes || {},
       derived: deriveValues(records, index),
+      ...(r.cause ? { cause: r.cause } : {}),
     })),
   };
 }
