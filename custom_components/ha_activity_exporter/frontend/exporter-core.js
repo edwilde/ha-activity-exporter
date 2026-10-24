@@ -202,9 +202,8 @@ function repeatSignature(record) {
 }
 
 /**
- * "Skip repeats" filter: keep a record only when its value or attributes differ
- * from the previously kept record, ignoring the volatile attributes. The first
- * record is always kept as the baseline.
+ * Keep a record only when its value or attributes differ from the previously
+ * kept record, ignoring the volatile attributes.
  *
  * @param {{state: string, attributes: object}[]} records assumed oldest-first
  */
@@ -240,7 +239,6 @@ const METADATA_NAMES = new Set([
   "restored",
   "options",
   "entity_id",
-  "mode",
   "step",
 ]);
 
@@ -285,6 +283,9 @@ const LIGHT_TUPLES = [
   ["rgbww_color", ["red", "green", "blue", "cold_white", "warm_white"]],
   ["xy_color", ["x", "y"]],
 ];
+
+/** The light colour tuple attribute names. */
+const TUPLE_NAMES = new Set(LIGHT_TUPLES.map(([key]) => key));
 
 /**
  * Report whether an attribute name looks like descriptive metadata.
@@ -350,9 +351,7 @@ function brightnessPercent(brightness) {
 
 /**
  * Split an attributes object into spreadsheet cells and the leftovers that do
- * not fit in a cell. Metadata keys appear in neither. Light colour tuples become
- * named columns, brightness gains a percentage, scalar lists become compact JSON
- * text, and objects, mixed lists and tuples not fully placed stay in leftovers.
+ * not fit in a cell.
  *
  * @param {object} attributes
  * @param {Set<string>} metadata keys from metadataKeys()
@@ -361,11 +360,12 @@ function brightnessPercent(brightness) {
 export function flattenAttributes(attributes, metadata) {
   const cells = {};
   const leftovers = {};
-  const tupleNames = new Map(LIGHT_TUPLES);
   for (const [key, value] of Object.entries(attributes || {})) {
-    if (metadata.has(key) || value == null || tupleNames.has(key)) continue;
-    if (isScalar(value)) cells[columnName(key)] = value;
-    else if (Array.isArray(value) && value.every(isScalar)) cells[columnName(key)] = JSON.stringify(value);
+    if (metadata.has(key) || value == null || TUPLE_NAMES.has(key)) continue;
+    const column = columnName(key);
+    if (column in cells) leftovers[key] = value;
+    else if (isScalar(value)) cells[column] = value;
+    else if (Array.isArray(value) && value.every(isScalar)) cells[column] = JSON.stringify(value);
     else leftovers[key] = value;
   }
   for (const [key, names] of LIGHT_TUPLES) {
@@ -392,9 +392,8 @@ export function flattenAttributes(attributes, metadata) {
 }
 
 /**
- * List the attribute columns that hold a value in at least one record: the light
- * columns first in their fixed order, then the rest alphabetically. Fixed
- * columns (timestamp, value, ...) are not included.
+ * List the attribute columns that hold a value in at least one record, light
+ * columns first and the rest alphabetically.
  *
  * @param {{attributes: object}[]} records
  * @param {Set<string>} metadata keys from metadataKeys()
@@ -485,12 +484,7 @@ export function secondsSincePrevious(records, index) {
 }
 
 /**
- * Build CSV text (CRLF line endings, RFC-4180 quoting).
- * By default each setting recorded alongside the value gets its own column:
- * timestamp, value, seconds_since_previous, the setting columns, then details
- * (a compact JSON string of whatever does not fit in a column). With
- * splitColumns false the output is the three columns timestamp, value, details,
- * where details holds all the recorded information.
+ * Build CSV text with CRLF line endings, one column per setting unless splitColumns is false.
  *
  * @param {{timestampMs:number, state:string, attributes:object}[]} records oldest-first
  * @param {string} [timeZone]
@@ -512,7 +506,9 @@ export function toCsv(records, timeZone, { splitColumns = true } = {}) {
   }
   const metadata = metadataKeys(records);
   const columns = buildColumns(records, metadata);
-  const lines = [["timestamp", "value", "seconds_since_previous", ...columns, "details"].join(",")];
+  const lines = [
+    ["timestamp", "value", "seconds_since_previous", ...columns, "details"].map(csvEscape).join(","),
+  ];
   records.forEach((r, index) => {
     const { cells, leftovers } = flattenAttributes(r.attributes, metadata);
     const details = Object.keys(leftovers).length ? JSON.stringify(leftovers) : "";

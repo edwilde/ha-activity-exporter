@@ -842,6 +842,38 @@ test("toCsv: split layout still neutralises =cmd and other formula text", () => 
   assert.equal(rows[1], "2026-01-15T00:00:00+00:00,'=cmd,,'=cmd,-1.5e-3,'-abc,'-5abc,'+1,");
 });
 
+// Checks header names that need quoting or neutralising go through the same escaping as the rows.
+test("toCsv: split layout escapes attribute names in the header row", () => {
+  const records = recordsFrom([{ s: "on", lu: BASE, a: { "a,b": 1, "=cmd": 2 } }]);
+  const rows = toCsv(records, "UTC").split("\r\n");
+  assert.equal(rows[0], "timestamp,value,seconds_since_previous,'=cmd,\"a,b\",details");
+  assert.equal(rows[1], "2026-01-15T00:00:00+00:00,on,,2,1,");
+});
+
+// Checks a real attribute named attribute_<name> goes to details instead of overwriting the renamed cell.
+test("flattenAttributes and toCsv: a colliding attribute_ name goes to details", () => {
+  const records = recordsFrom([{ s: "on", lu: BASE, a: { value: 1, attribute_value: 2 } }]);
+  const { cells, leftovers } = flattenAttributes(records[0].attributes, metadataKeys(records));
+  assert.deepEqual(cells, { attribute_value: 1 });
+  assert.deepEqual(leftovers, { attribute_value: 2 });
+  const rows = toCsv(records, "UTC").split("\r\n");
+  assert.equal(rows[0], "timestamp,value,seconds_since_previous,attribute_value,details");
+  assert.equal(rows[1], '2026-01-15T00:00:00+00:00,on,,1,"{""attribute_value"":2}"');
+});
+
+// Checks a constant humidifier mode is a setting and gets its own column.
+test("toCsv: a humidifier's constant mode gets a column", () => {
+  const records = recordsFrom([
+    { s: "on", lu: BASE, a: { mode: "auto", humidity: 50 } },
+    { s: "on", lu: BASE + 60, lc: BASE, a: { mode: "auto", humidity: 55 } },
+  ]);
+  assert.deepEqual(toCsv(records, "UTC").split("\r\n"), [
+    "timestamp,value,seconds_since_previous,humidity,mode,details",
+    "2026-01-15T00:00:00+00:00,on,,50,auto,",
+    "2026-01-15T00:01:00+00:00,on,60,55,auto,",
+  ]);
+});
+
 // Checks empty input gives the split header with no attribute columns.
 test("toCsv: split layout with empty records yields the header line only", () => {
   assert.equal(toCsv([], "UTC"), "timestamp,value,seconds_since_previous,details");
