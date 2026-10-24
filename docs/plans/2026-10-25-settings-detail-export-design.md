@@ -37,7 +37,7 @@ settings get their own columns.
 | Which attributes become columns | Every attribute **except descriptive/capability metadata**. Metadata = a known set (`friendly_name`, `icon`, `entity_picture`, `unit_of_measurement`, `device_class`, `state_class`, `attribution`, `supported_features`, `supported_color_modes`, `assumed_state`, `editable`, `id`, `restored`, `options`, `entity_id`, `mode`, `step`) plus the name patterns `min_*`, `max_*`, `*_list`, `*_modes`, `*_step`, **and only while its value is constant across the export.** A metadata-looking attribute that varies gets a column after all. | A known-name rule keeps the column set stable between exports of the same device (a steady thermostat target still gets its column). The "constant" guard means a misclassified attribute (a statistics sensor's `max_value`) is never hidden. |
 | Column values | Scalars as-is (`null` → blank). Known light tuples split into named columns. Any other list → one column holding compact JSON. Objects → `details`. | Spreadsheet- and LLM-friendly without inventing structure. |
 | Light tuples | `hs_color` → `hue`, `saturation`; `rgb_color` → `red`, `green`, `blue` (falling back to the first three of `rgbw_color`/`rgbww_color` when `rgb_color` is absent); `rgbw_color[3]` → `white`; `rgbww_color[3..4]` → `cold_white`, `warm_white`; `xy_color` → `x`, `y`. A tuple whose numbers were not all placed in columns stays in `details`. | Briefing R1, without losing the raw rgbw values when HA also reports `rgb_color`. |
-| Derived values | `brightness_percent = round(brightness / 255 * 100, 1)` (after `brightness`). `seconds_since_previous` (3 dp) is computed **after** Skip repeats, against the previous row in the file; blank on the first row. | Describes the gaps the reader actually sees. |
+| Derived values | `brightness_percent = round(brightness / 255 * 100, 1)` (after `brightness`). `seconds_since_previous` (3 dp) is computed **after** Skip repeats, against the previous row in the file; blank on the first row. So with Skip repeats on, `seconds_since_previous` spans the rows that were left out. | Describes the gaps the reader actually sees. |
 | Column order | `timestamp, value, seconds_since_previous`, then the light set in briefing order (`brightness, brightness_percent, color_mode, color_temp_kelvin, hue, saturation, red, green, blue, white, cold_white, warm_white, x, y`), then other attribute columns alphabetically, then `changed_by`, then `details`. Only columns that hold a value somewhere in the file are included. | Lights read as the briefing specified; other devices get a stable, predictable order with no empty columns. |
 | Column name clash | An attribute named like a fixed column (`timestamp`, `value`, …) is prefixed `attribute_`. | Never two columns with one header. |
 | Switch | **"Give each setting its own column"**, on by default, shown for every device. Off → today's exact `timestamp,value,details` CSV. JSON is unaffected. | Briefing UX, generalised; keeps the old format one click away for anyone parsing it. |
@@ -68,8 +68,10 @@ New/changed pure functions:
 
 - Logbook failure (integration not loaded, permission, timeout) → swallowed, export
   proceeds without causes. History failure keeps today's plain-language error.
-- Malformed attribute values (non-numeric brightness, short tuples) → blank cells,
-  never a crash.
+- Malformed attribute values never crash the export. A non-numeric value (for example
+  brightness `"high"`) is kept as-is in its column and only the derived values
+  (`brightness_percent`) are left blank. A short or malformed tuple leaves its
+  columns blank.
 
 ## Testing
 

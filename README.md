@@ -15,7 +15,8 @@ Home Assistant so you can open it in a spreadsheet or hand it to an AI for analy
 
 - 🔎 **Pick one device or sensor** with a searchable selector.
 - 🗓️ **Choose a time period** — quick buttons (last 24 hours / 7 days / 30 days) or your own start and end dates.
-- 🧹 **Skip repeats** — an optional switch that leaves out rows where nothing actually changed, so your file isn't full of noise.
+- 🎚️ **Every setting in its own column** - brightness, colour, temperature, position and more each get a column in the spreadsheet, and every step is kept, so you can see exactly what a device did and when.
+- 🧹 **Skip repeats** - an optional switch that leaves out rows where neither the value nor any setting changed, so your file isn't full of noise.
 - 📊 **Download as a spreadsheet (CSV)** — opens in Excel, Numbers, or Google Sheets.
 - 🤖 **Download as a data file (JSON)** — self-describing, ideal for feeding to an LLM.
 - ⏳ **Live progress** while it gathers the history.
@@ -47,35 +48,95 @@ Home Assistant recorded (optionally minus the repeats).
 1. Open **Activity Exporter** from the sidebar.
 2. **What do you want to export?** — start typing the name of a device or sensor and pick it.
 3. **Time period** — tap a quick button, or choose your own start and end dates.
-4. Optionally turn on **Skip repeats** to leave out no-change rows.
-5. Click **Download spreadsheet (CSV)** or **Download data file (JSON)**.
+4. Leave **Give each setting its own column** on to get one spreadsheet column per setting (brightness, colour, temperature and so on), or turn it off for a simple three-column file.
+5. Optionally turn on **Skip repeats** to leave out rows where nothing changed.
+6. Click **Download spreadsheet (CSV)** or **Download data file (JSON)**.
 
 ## What the files look like
 
-**CSV** — one row per recorded change (`details` holds the extra information recorded alongside the value, as compact JSON):
+**CSV** - one row each time Home Assistant recorded a change, including changes to a setting while the value stays the same. `seconds_since_previous` is the time since the row above it, and each setting has its own column. Descriptive information such as the name, icon, units and supported modes is left out of the columns; `details` holds anything that could not get a column.
 
 ```csv
-timestamp,value,details
-2026-05-30T08:01:12+12:00,on,"{""friendly_name"":""Front Door"",""device_class"":""door""}"
-2026-05-30T08:04:55+12:00,off,"{""friendly_name"":""Front Door"",""device_class"":""door""}"
+timestamp,value,seconds_since_previous,brightness,brightness_percent,color_mode,hue,saturation,red,green,blue,x,y,details
+2026-05-30T06:30:00+12:00,on,,26,10.2,hs,30,80,255,170,51,0.55,0.39,
+2026-05-30T06:30:30+12:00,on,30,51,20,hs,30,70,255,189,77,0.5,0.39,
+2026-05-30T06:31:00+12:00,on,30,77,30.2,hs,30,60,255,204,102,0.46,0.39,
 ```
 
-**JSON** — a self-describing wrapper so an LLM has all the context it needs:
+With **Give each setting its own column** turned off, the header is `timestamp,value,details` and `details` holds all the extra information as compact JSON.
+
+**JSON** - a self-describing wrapper so an LLM has all the context it needs. `entity` describes the device, and each record has a `derived` block with values worked out for you (shown here for two records):
 
 ```json
 {
-  "entity_id": "binary_sensor.front_door",
-  "friendly_name": "Front Door",
-  "exported_at": "2026-05-31T10:00:00+12:00",
-  "period": { "start": "2026-05-30T00:00:00+12:00", "end": "2026-05-31T00:00:00+12:00" },
-  "state_changes_only": true,
+  "entity_id": "light.bedroom_lamp",
+  "friendly_name": "Bedroom Lamp",
+  "entity": {
+    "entity_id": "light.bedroom_lamp",
+    "friendly_name": "Bedroom Lamp",
+    "domain": "light",
+    "capabilities": {
+      "friendly_name": "Bedroom Lamp",
+      "supported_color_modes": [
+        "hs"
+      ]
+    }
+  },
+  "exported_at": "2026-05-30T07:00:00+12:00",
+  "period": {
+    "start": "2026-05-30T06:00:00+12:00",
+    "end": "2026-05-30T07:00:00+12:00"
+  },
+  "state_changes_only": false,
   "record_count": 2,
   "records": [
-    { "timestamp": "2026-05-30T08:01:12+12:00", "state": "on", "attributes": { "friendly_name": "Front Door", "device_class": "door" } },
-    { "timestamp": "2026-05-30T08:04:55+12:00", "state": "off", "attributes": { "friendly_name": "Front Door", "device_class": "door" } }
+    {
+      "timestamp": "2026-05-30T06:30:00+12:00",
+      "state": "on",
+      "attributes": {
+        "friendly_name": "Bedroom Lamp",
+        "supported_color_modes": [
+          "hs"
+        ],
+        "color_mode": "hs",
+        "brightness": 26,
+        "hs_color": [
+          30,
+          80
+        ]
+      },
+      "derived": {
+        "state_changed": true,
+        "seconds_since_previous": null,
+        "brightness_percent": 10.2
+      }
+    },
+    {
+      "timestamp": "2026-05-30T06:30:30+12:00",
+      "state": "on",
+      "attributes": {
+        "friendly_name": "Bedroom Lamp",
+        "supported_color_modes": [
+          "hs"
+        ],
+        "color_mode": "hs",
+        "brightness": 51,
+        "hs_color": [
+          30,
+          70
+        ]
+      },
+      "derived": {
+        "state_changed": false,
+        "seconds_since_previous": 30,
+        "brightness_percent": 20
+      }
+    }
   ]
 }
 ```
+
+`state_changes_only` is `true` when **Skip repeats** was on. With it on, `seconds_since_previous` is the time since the previous row in the file, so it spans any rows that were left out.
 
 ## How it works (for the curious)
 
@@ -91,6 +152,7 @@ a time so you get a real progress bar.
 - Only covers history that Home Assistant has actually recorded. If a thing is
   excluded from recording, or the range predates your retention period, there will be
   nothing to export.
+- The time between rows reflects what Home Assistant recorded. Rows from before Home Assistant was told to record a device are not available.
 - The whole result is assembled in your browser, so extremely long ranges of a very
   chatty sensor may be slow.
 

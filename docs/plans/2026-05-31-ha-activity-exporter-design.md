@@ -19,7 +19,7 @@ data — we dump it faithfully, with an optional filter to remove no-change nois
 | Time period | **Preset chips (24h / 7d / 30d) + custom start/end range** | Fast common cases, full control when needed. |
 | Download | **Client-side Blob** | Uses the panel's authenticated `hass` WebSocket; no backend endpoint, no token handling. Matches HArvest / HA-Entity-Analyzer. |
 | Frontend | **Single vanilla web component, no build step, no CDN runtime deps** | Robust on isolated/offline HA installs; trivial HACS install & release. |
-| "Skip repeats" filter | **Client-side dedup**: keep a row only when the state *value* differs from the previous kept row | Predictable and transparent, independent of HA's internal "significant change" heuristic. |
+| "Skip repeats" filter | **Superseded** by `2026-10-25-settings-detail-export-design.md` (a repeat now needs the same value and the same settings). Originally: **client-side dedup**: keep a row only when the state *value* differs from the previous kept row | Predictable and transparent, independent of HA's internal "significant change" heuristic. |
 | Copy | **Plain language, zero HA jargon** | Target users don't know "entity / state / recorder". This is a requirement, not a nice-to-have. |
 
 ## Architecture
@@ -82,6 +82,8 @@ HA CSS variables (`--primary-color`, `--card-background-color`, `--primary-text-
 `hass.callWS({ type: "history/history_during_period", start_time, end_time, entity_ids: [id], significant_changes_only: false, minimal_response: false, no_attributes: false })`, issued per day-chunk and concatenated. Timestamps use HA's configured timezone. The "skip repeats" filter is applied client-side after fetch.
 
 ### Output formats
+
+> **Superseded:** the CSV columns and JSON shape below are replaced by `2026-10-25-settings-detail-export-design.md` (one column per setting, `seconds_since_previous`, JSON `entity` and `derived` blocks).
 
 **JSON** — metadata wrapper:
 ```json
