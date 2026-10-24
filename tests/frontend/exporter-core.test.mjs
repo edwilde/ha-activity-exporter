@@ -22,6 +22,7 @@ import {
   secondsSincePrevious,
   toCsv,
   toJson,
+  userNamesFromStates,
   wallClockToEpochMs,
 } from "../../custom_components/ha_activity_exporter/frontend/exporter-core.js";
 
@@ -1168,6 +1169,47 @@ test("describeCause: the entity wins over the service and nothing usable is blan
   assert.equal(describeCause({ ...SCRIPT_CAUSE, context_service: "turn_on" }), "script.weekend_sunrise (Weekend sunrise)");
   assert.equal(describeCause({ context_event_type: "call_service" }), "");
   assert.equal(describeCause(undefined), "");
+});
+
+// Checks a user-only cause reads as the person's name when the id is known.
+test("describeCause: a user-only cause reads the person's name when known", () => {
+  assert.equal(describeCause({ context_user_id: "abc123" }, { abc123: "Sam" }), "Sam");
+});
+
+// Checks an unknown user id keeps the id text.
+test("describeCause: a user-only cause keeps the id when the person is not in the names", () => {
+  assert.equal(describeCause({ context_user_id: "abc123" }, { other: "Sam" }), "user abc123");
+});
+
+// Checks a script cause is not replaced by a name even when the user is known.
+test("describeCause: the names are only used for a user-only cause", () => {
+  assert.equal(
+    describeCause({ ...SCRIPT_CAUSE, context_user_id: "abc123" }, { abc123: "Sam" }),
+    "script.weekend_sunrise (Weekend sunrise)"
+  );
+});
+
+// Checks person entries become an id to name map with the documented fallbacks.
+test("userNamesFromStates: maps user ids to friendly names, falling back to the object id", () => {
+  const states = {
+    "person.sam": { attributes: { user_id: "u1", friendly_name: "Sam Smith" } },
+    "person.alex": { attributes: { user_id: "u2" } },
+    "person.guest": { attributes: { friendly_name: "Guest" } },
+    "light.bedside": { attributes: { user_id: "u3", friendly_name: "Bedside" } },
+  };
+  assert.deepEqual(userNamesFromStates(states), { u1: "Sam Smith", u2: "alex" });
+});
+
+// Checks missing states give an empty map.
+test("userNamesFromStates: returns an empty map when there are no states", () => {
+  assert.deepEqual(userNamesFromStates(undefined), {});
+});
+
+// Checks the CSV shows the person's name for a user-only cause.
+test("toCsv: split layout names the person behind a user-only cause", () => {
+  const records = attachCauses(bedsideRecords(), parseLogbookEntries([logbookEntry({ context_user_id: "u1" })], "x.y"));
+  const rows = toCsv(records, "UTC", { userNames: { u1: "Sam Smith" } }).split("\r\n");
+  assert.equal(rows[1], "2026-01-15T00:00:00+00:00,on,,3,1.2,hs,27.5,63.2,255,150,100,0.5,0.4,Sam Smith,");
 });
 
 /** Bedside rows with the first row caused by the script. */

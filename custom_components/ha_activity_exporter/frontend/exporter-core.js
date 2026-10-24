@@ -473,9 +473,7 @@ function firstRecordFrom(records, ms) {
 }
 
 /**
- * Give each record the cause of the logbook entry with the same value recorded
- * at the same moment. Each entry goes to the nearest matching record only, the
- * earlier one on a tie, and a record keeps the first entry that matched it.
+ * Give each record the cause of the nearest logbook entry with the same value at the same moment.
  *
  * @param {{timestampMs: number, state: string}[]} records oldest-first
  * @param {{whenMs: number, state: string, cause: Record<string, any>}[]} entries
@@ -509,13 +507,31 @@ export function attachCauses(records, entries) {
 }
 
 /**
+ * Build a map of user id to display name from the person entries in a states object.
+ *
+ * @param {Record<string, {attributes?: Record<string, any>}>} [states]
+ * @returns {Record<string, string>}
+ */
+export function userNamesFromStates(states) {
+  const names = {};
+  for (const [entityId, state] of Object.entries(states || {})) {
+    if (!entityId.startsWith("person.")) continue;
+    const userId = state?.attributes?.user_id;
+    if (!userId) continue;
+    names[userId] = state.attributes.friendly_name || entityId.slice("person.".length);
+  }
+  return names;
+}
+
+/**
  * Turn a cause into short text: the entity that did it, else the service that
  * was called, else the source or message, else the user.
  *
  * @param {Record<string, any>} [cause]
+ * @param {Record<string, string>} [userNames] user id to display name
  * @returns {string} empty when nothing applies
  */
-export function describeCause(cause) {
+export function describeCause(cause, userNames) {
   const c = cause || {};
   if (c.context_entity_id) {
     return c.context_name ? `${c.context_entity_id} (${c.context_name})` : String(c.context_entity_id);
@@ -523,7 +539,8 @@ export function describeCause(cause) {
   if (c.context_domain && c.context_service) return `${c.context_domain}.${c.context_service}`;
   const text = [c.context_source, c.context_message].filter(Boolean).join(": ");
   if (text) return text;
-  return c.context_user_id ? `user ${c.context_user_id}` : "";
+  if (!c.context_user_id) return "";
+  return userNames?.[c.context_user_id] || `user ${c.context_user_id}`;
 }
 
 // --- formatting -----------------------------------------------------------
@@ -602,9 +619,9 @@ export function secondsSincePrevious(records, index) {
  *
  * @param {{timestampMs:number, state:string, attributes:object, cause?:object}[]} records oldest-first
  * @param {string} [timeZone]
- * @param {{splitColumns?: boolean}} [options]
+ * @param {{splitColumns?: boolean, userNames?: Record<string, string>}} [options]
  */
-export function toCsv(records, timeZone, { splitColumns = true } = {}) {
+export function toCsv(records, timeZone, { splitColumns = true, userNames } = {}) {
   if (!splitColumns) {
     const lines = ["timestamp,value,details"];
     for (const r of records) {
@@ -620,7 +637,7 @@ export function toCsv(records, timeZone, { splitColumns = true } = {}) {
   }
   const metadata = metadataKeys(records);
   const columns = buildColumns(records, metadata);
-  const showCauses = records.some((r) => describeCause(r.cause) !== "");
+  const showCauses = records.some((r) => describeCause(r.cause, userNames) !== "");
   const lines = [
     [
       "timestamp",
@@ -642,7 +659,7 @@ export function toCsv(records, timeZone, { splitColumns = true } = {}) {
         r.state,
         secondsSincePrevious(records, index),
         ...columns.map((name) => cells[name]),
-        ...(showCauses ? [describeCause(r.cause)] : []),
+        ...(showCauses ? [describeCause(r.cause, userNames)] : []),
         details,
       ]
         .map(csvEscape)
