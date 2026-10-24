@@ -15,13 +15,13 @@ Home Assistant so you can open it in a spreadsheet or hand it to an AI for analy
 
 - 🔎 **Pick one device or sensor** with a searchable selector.
 - 🗓️ **Choose a time period** — quick buttons (last 24 hours / 7 days / 30 days) or your own start and end dates.
-- 🎚️ **Every setting in its own column** - brightness, colour, temperature, position and more each get a column in the spreadsheet, and every step is kept, so you can see exactly what a device did and when.
+- 🎚️ **Every setting in its own column** - brightness, colour, temperature, position and more each get a column in the spreadsheet, and every recorded step is included, so you can see exactly what a device did and when.
 - 🧹 **Skip repeats** - an optional switch that leaves out rows where neither the value nor any setting changed, so your file isn't full of noise.
 - 📊 **Download as a spreadsheet (CSV)** — opens in Excel, Numbers, or Google Sheets.
 - 🤖 **Download as a data file (JSON)** — self-describing, ideal for feeding to an LLM.
 - ⏳ **Live progress** while it gathers the history.
 
-It does **not** change, summarise, or interpret your data. It dumps exactly what
+It does **not** change, summarise, or interpret your data. It exports the history
 Home Assistant recorded (optionally minus the repeats).
 
 ## Installation
@@ -65,7 +65,7 @@ timestamp,value,seconds_since_previous,brightness,brightness_percent,color_mode,
 
 With **Give each setting its own column** turned off, the header is `timestamp,value,details` and `details` holds all the extra information as compact JSON.
 
-**JSON** - a self-describing wrapper so an LLM has all the context it needs. `entity` describes the device, and each record has a `derived` block with values worked out for you (shown here for two records):
+**JSON** - a self-describing wrapper so an LLM has all the context it needs. `entity` describes the device, and each record has a `derived` block with values worked out for you, such as whether the value itself changed and the seconds since the previous row (shown here for two records):
 
 ```json
 {
@@ -152,7 +152,6 @@ a time so you get a real progress bar.
 - Only covers history that Home Assistant has actually recorded. If a thing is
   excluded from recording, or the range predates your retention period, there will be
   nothing to export.
-- The time between rows reflects what Home Assistant recorded. Rows from before Home Assistant was told to record a device are not available.
 - The whole result is assembled in your browser, so extremely long ranges of a very
   chatty sensor may be slow.
 

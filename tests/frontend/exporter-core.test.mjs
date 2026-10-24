@@ -229,6 +229,19 @@ test("normaliseRecords: drops a duplicate whose attribute keys are in a differen
   assert.equal(out.length, 1);
 });
 
+// Checks an interleaved duplicate at the same time (A, B, A) is dropped.
+test("normaliseRecords: drops a duplicate separated from its twin by another row at the same time", () => {
+  const out = normaliseRecords([
+    { timestampMs: 1000, state: "on", attributes: { brightness: 10 } },
+    { timestampMs: 1000, state: "on", attributes: { brightness: 20 } },
+    { timestampMs: 1000, state: "on", attributes: { brightness: 10 } },
+  ]);
+  assert.deepEqual(
+    out.map((r) => r.attributes.brightness),
+    [10, 20]
+  );
+});
+
 test("normaliseRecords: de-dups carried-over state across day chunks (real parse path)", () => {
   const T = 1768435200;
   // Chunk 0 ends with the door "on"; chunk 1's include_start_time_state seed
@@ -290,6 +303,22 @@ test("filterRepeats: a value change with identical attributes is kept", () => {
     { timestampMs: 2, state: "off", attributes: { brightness: 10 } },
   ];
   assert.equal(filterRepeats(input).length, 2);
+});
+
+// Checks rows missing the volatile attributes, or all attributes, compare by what remains.
+test("filterRepeats: a row lacking media position or attributes is compared on the rest", () => {
+  const input = [
+    { timestampMs: 1, state: "playing", attributes: { volume_level: 0.5, media_position: 10, media_position_updated_at: "2026-01-01T00:00:00Z" } },
+    { timestampMs: 2, state: "playing", attributes: { volume_level: 0.5 } }, // repeat of 1
+    { timestampMs: 3, state: "idle", attributes: {} },
+    { timestampMs: 4, state: "idle", attributes: undefined }, // repeat of 3
+    { timestampMs: 5, state: "idle", attributes: { volume_level: 0.5 } },
+  ];
+  const out = filterRepeats(input);
+  assert.deepEqual(
+    out.map((r) => r.timestampMs),
+    [1, 3, 5]
+  );
 });
 
 // Checks empty input gives empty output.
@@ -394,8 +423,8 @@ test("toCsv: legacy layout with empty records yields the header line only", () =
 
 test("buildJsonPayload: self-describing wrapper shape (machine schema keeps HA names)", () => {
   const records = [
-    { timestampMs: Date.UTC(2026, 0, 15, 1, 0, 0), state: "on", attributes: { device_class: "door" } },
-    { timestampMs: Date.UTC(2026, 0, 15, 2, 0, 0), state: "off", attributes: {} },
+    { timestampMs: Date.UTC(2026, 0, 15, 1, 0, 0), lastChangedMs: Date.UTC(2026, 0, 15, 1, 0, 0), state: "on", attributes: { device_class: "door" } },
+    { timestampMs: Date.UTC(2026, 0, 15, 2, 0, 0), lastChangedMs: Date.UTC(2026, 0, 15, 2, 0, 0), state: "off", attributes: {} },
   ];
   const payload = buildJsonPayload(
     {
@@ -890,12 +919,6 @@ test("buildJsonPayload: brightness_percent is only present for a numeric brightn
   assert.deepEqual(derived[1], { state_changed: true, seconds_since_previous: 1 });
   assert.deepEqual(derived[2], { state_changed: true, seconds_since_previous: 1, brightness_percent: 0 });
   assert.deepEqual(derived[3], { state_changed: true, seconds_since_previous: 1 });
-});
-
-// Checks a record without lastChangedMs counts as a value change.
-test("buildJsonPayload: a record without lastChangedMs counts as state_changed true", () => {
-  const records = [{ timestampMs: 5000, state: "on", attributes: {} }];
-  assert.equal(buildJsonPayload(JSON_META, records, "UTC").records[0].derived.state_changed, true);
 });
 
 // Checks toJson passes the new blocks through.

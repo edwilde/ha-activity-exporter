@@ -120,8 +120,6 @@ export function chunkRangeByDay(startISO, endISO) {
 
 /**
  * Convert one entity's compressed-state rows into normalised records.
- * Each row is timed by when it was recorded (lu); lastChangedMs is when its
- * value last changed (lc, or lu when lc is absent). Rows without lu are skipped.
  *
  * @param {Record<string, any[]>} wsResult result object from the WS command
  * @param {string} entityId entity whose rows to extract
@@ -169,12 +167,17 @@ function stableStringify(value) {
 export function normaliseRecords(records) {
   const sorted = [...records].sort((a, b) => a.timestampMs - b.timestampMs);
   const out = [];
-  let prevKey;
+  let seenAtTimestamp = new Set();
+  let currentTimestamp;
   for (const r of sorted) {
-    const key = `${r.timestampMs}|${r.state}|${stableStringify(r.attributes || {})}`;
-    if (key !== prevKey) {
+    if (r.timestampMs !== currentTimestamp) {
+      currentTimestamp = r.timestampMs;
+      seenAtTimestamp = new Set();
+    }
+    const key = `${r.state}|${stableStringify(r.attributes || {})}`;
+    if (!seenAtTimestamp.has(key)) {
       out.push(r);
-      prevKey = key;
+      seenAtTimestamp.add(key);
     }
   }
   return out;
@@ -568,7 +571,7 @@ function latestCapabilities(records) {
 function deriveValues(records, index) {
   const r = records[index];
   const derived = {
-    state_changed: r.lastChangedMs == null || r.lastChangedMs === r.timestampMs,
+    state_changed: r.lastChangedMs === r.timestampMs,
     seconds_since_previous: secondsSincePrevious(records, index),
   };
   const percent = brightnessPercent((r.attributes || {}).brightness);

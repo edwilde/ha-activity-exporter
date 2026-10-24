@@ -155,7 +155,7 @@ class ActivityExporterPanel extends HTMLElement {
     this._splitColumns = true;
 
     // Cache of raw (unfiltered) records keyed by entity+range, so switching
-    // format or toggling "skip repeats" never refetches.
+    // format or toggling "skip repeats" or "own column" never refetches.
     this._cacheKey = null;
     this._cacheRecords = null;
 
