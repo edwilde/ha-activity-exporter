@@ -179,6 +179,7 @@ class ActivityExporterPanel extends HTMLElement {
     // format or toggling "skip repeats" or "own column" never refetches.
     this._cacheKey = null;
     this._cacheRecords = null;
+    this._cacheCausesUnavailable = false;
     this._causesUnavailable = false;
 
     this._busy = false;
@@ -626,7 +627,7 @@ class ActivityExporterPanel extends HTMLElement {
   async _loadRecords(startMs, endMs) {
     const key = `${this._entityId}|${startMs}|${endMs}`;
     if (this._cacheKey === key && this._cacheRecords) {
-      this._causesUnavailable = false;
+      this._causesUnavailable = this._cacheCausesUnavailable;
       return this._cacheRecords;
     }
 
@@ -678,12 +679,9 @@ class ActivityExporterPanel extends HTMLElement {
 
     const records = attachCauses(normaliseRecords(collected), entries);
     this._causesUnavailable = !causesAvailable;
-    if (causesAvailable) {
-      this._cacheKey = key;
-      this._cacheRecords = records;
-    } else {
-      this._invalidateCache();
-    }
+    this._cacheKey = key;
+    this._cacheRecords = records;
+    this._cacheCausesUnavailable = !causesAvailable;
     return records;
   }
 
