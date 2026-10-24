@@ -123,19 +123,18 @@ export function chunkRangeByDay(startISO, endISO) {
  *
  * @param {Record<string, any[]>} wsResult result object from the WS command
  * @param {string} entityId entity whose rows to extract
- * @returns {{timestampMs: number, state: string, attributes: object}[]}
+ * @returns {{timestampMs: number, lastChangedMs: number, state: string, attributes: object}[]}
  */
 export function parseHistoryRecords(wsResult, entityId) {
   const rows = (wsResult && wsResult[entityId]) || [];
   const records = [];
   for (const row of rows) {
     if (!row || typeof row !== "object") continue;
-    const lu = typeof row.lu === "number" ? row.lu : undefined;
-    const lc = typeof row.lc === "number" ? row.lc : lu;
-    const whenSec = lc !== undefined ? lc : lu;
-    if (whenSec === undefined) continue;
+    if (typeof row.lu !== "number") continue;
+    const lc = typeof row.lc === "number" ? row.lc : row.lu;
     records.push({
-      timestampMs: whenSec * 1000,
+      timestampMs: row.lu * 1000,
+      lastChangedMs: lc * 1000,
       state: row.s != null ? String(row.s) : "",
       attributes: row.a && typeof row.a === "object" ? row.a : {},
     });
@@ -144,41 +143,273 @@ export function parseHistoryRecords(wsResult, entityId) {
 }
 
 /**
- * Sort records oldest-first and remove exact duplicates (same timestamp + state)
- * that can appear at day-chunk boundaries.
+ * Serialise a value to JSON text with object keys sorted at every depth, so two
+ * values with the same content always give the same string.
+ *
+ * @param {any} value
+ * @returns {string}
+ */
+function stableStringify(value) {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  if (value && typeof value === "object") {
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+/**
+ * Sort records oldest-first and remove exact duplicates (same timestamp, state
+ * and attributes) that can appear at day-chunk boundaries.
  *
  * @param {{timestampMs: number, state: string, attributes: object}[]} records
  */
 export function normaliseRecords(records) {
   const sorted = [...records].sort((a, b) => a.timestampMs - b.timestampMs);
   const out = [];
-  let prevKey;
+  let seenAtTimestamp = new Set();
+  let currentTimestamp;
   for (const r of sorted) {
-    const key = `${r.timestampMs}|${r.state}`;
-    if (key !== prevKey) {
+    if (r.timestampMs !== currentTimestamp) {
+      currentTimestamp = r.timestampMs;
+      seenAtTimestamp = new Set();
+    }
+    const key = `${r.state}|${stableStringify(r.attributes || {})}`;
+    if (!seenAtTimestamp.has(key)) {
       out.push(r);
-      prevKey = key;
+      seenAtTimestamp.add(key);
     }
   }
   return out;
 }
 
+/** Attributes that change continuously and do not count as a real change. */
+const VOLATILE_ATTRIBUTES = new Set(["media_position", "media_position_updated_at"]);
+
 /**
- * "Skip repeats" filter: keep a record only when its state VALUE differs from
- * the previously kept record. The first record is always kept as the baseline.
+ * Serialise a record's value and attributes, leaving out the volatile
+ * attributes, so equal strings mean "nothing meaningful changed".
  *
- * @param {{state: string}[]} records assumed oldest-first
+ * @param {{state: string, attributes: object}} record
+ * @returns {string}
  */
-export function filterStateChanges(records) {
+function repeatSignature(record) {
+  const attributes = {};
+  for (const [key, value] of Object.entries(record.attributes || {})) {
+    if (!VOLATILE_ATTRIBUTES.has(key)) attributes[key] = value;
+  }
+  return `${record.state}|${stableStringify(attributes)}`;
+}
+
+/**
+ * Keep a record only when its value or attributes differ from the previously
+ * kept record, ignoring the volatile attributes.
+ *
+ * @param {{state: string, attributes: object}[]} records assumed oldest-first
+ */
+export function filterRepeats(records) {
   const out = [];
-  let prevState;
+  let prevSignature;
   for (const r of records) {
-    if (out.length === 0 || r.state !== prevState) {
+    const signature = repeatSignature(r);
+    if (signature !== prevSignature) {
       out.push(r);
-      prevState = r.state;
+      prevSignature = signature;
     }
   }
   return out;
+}
+
+// --- settings columns -----------------------------------------------------
+
+/** Attribute names that describe a device rather than record a setting. */
+const METADATA_NAMES = new Set([
+  "friendly_name",
+  "icon",
+  "entity_picture",
+  "unit_of_measurement",
+  "device_class",
+  "state_class",
+  "attribution",
+  "supported_features",
+  "supported_color_modes",
+  "assumed_state",
+  "editable",
+  "id",
+  "restored",
+  "options",
+  "entity_id",
+  "step",
+]);
+
+/** Name patterns for descriptive attributes: min_*, max_*, *_list, *_modes, *_step. */
+const METADATA_PATTERN = /^(min_|max_)|(_list|_modes|_step)$/;
+
+/** Columns that always exist in the split CSV layout. */
+const FIXED_COLUMNS = new Set([
+  "timestamp",
+  "value",
+  "seconds_since_previous",
+  "changed_by",
+  "details",
+]);
+
+/** Light columns, in the order they appear before the other attribute columns. */
+const LIGHT_COLUMNS = [
+  "brightness",
+  "brightness_percent",
+  "color_mode",
+  "color_temp_kelvin",
+  "hue",
+  "saturation",
+  "red",
+  "green",
+  "blue",
+  "white",
+  "cold_white",
+  "warm_white",
+  "x",
+  "y",
+];
+
+/**
+ * How each light colour tuple maps onto named columns: the column for each
+ * position, in order (the tuple length is the number of columns).
+ */
+const LIGHT_TUPLES = [
+  ["hs_color", ["hue", "saturation"]],
+  ["rgb_color", ["red", "green", "blue"]],
+  ["rgbw_color", ["red", "green", "blue", "white"]],
+  ["rgbww_color", ["red", "green", "blue", "cold_white", "warm_white"]],
+  ["xy_color", ["x", "y"]],
+];
+
+/** The light colour tuple attribute names. */
+const TUPLE_NAMES = new Set(LIGHT_TUPLES.map(([key]) => key));
+
+/**
+ * Report whether an attribute name looks like descriptive metadata.
+ *
+ * @param {string} name
+ * @returns {boolean}
+ */
+function looksLikeMetadata(name) {
+  return METADATA_NAMES.has(name) || METADATA_PATTERN.test(name);
+}
+
+/**
+ * Find the attribute names to treat as metadata: names that look descriptive and
+ * hold the same value in every record that has them.
+ *
+ * @param {{attributes: object}[]} records
+ * @returns {Set<string>}
+ */
+export function metadataKeys(records) {
+  const seen = new Map();
+  const varying = new Set();
+  for (const r of records) {
+    for (const [key, value] of Object.entries(r.attributes || {})) {
+      if (!looksLikeMetadata(key)) continue;
+      const signature = stableStringify(value);
+      if (!seen.has(key)) seen.set(key, signature);
+      else if (seen.get(key) !== signature) varying.add(key);
+    }
+  }
+  return new Set([...seen.keys()].filter((key) => !varying.has(key)));
+}
+
+/**
+ * Report whether a value is a string, number, boolean or null.
+ *
+ * @param {any} value
+ * @returns {boolean}
+ */
+function isScalar(value) {
+  return value === null || ["string", "number", "boolean"].includes(typeof value);
+}
+
+/**
+ * Give a column name the attribute_ prefix when it matches a fixed column.
+ *
+ * @param {string} name
+ * @returns {string}
+ */
+function columnName(name) {
+  return FIXED_COLUMNS.has(name) ? `attribute_${name}` : name;
+}
+
+/**
+ * Convert a brightness (0-255) to a percentage with one decimal place.
+ *
+ * @param {any} brightness
+ * @returns {number|null} null unless brightness is a finite number
+ */
+function brightnessPercent(brightness) {
+  if (typeof brightness !== "number" || !Number.isFinite(brightness)) return null;
+  return Math.round((brightness / 255) * 1000) / 10;
+}
+
+/**
+ * Split an attributes object into spreadsheet cells and the leftovers that do
+ * not fit in a cell.
+ *
+ * @param {object} attributes
+ * @param {Set<string>} metadata keys from metadataKeys()
+ * @returns {{cells: Record<string, any>, leftovers: Record<string, any>}}
+ */
+export function flattenAttributes(attributes, metadata) {
+  const cells = {};
+  const leftovers = {};
+  for (const [key, value] of Object.entries(attributes || {})) {
+    if (metadata.has(key) || value == null || TUPLE_NAMES.has(key)) continue;
+    const column = columnName(key);
+    if (column in cells) leftovers[key] = value;
+    else if (isScalar(value)) cells[column] = value;
+    else if (Array.isArray(value) && value.every(isScalar)) cells[column] = JSON.stringify(value);
+    else leftovers[key] = value;
+  }
+  for (const [key, names] of LIGHT_TUPLES) {
+    const value = attributes && attributes[key];
+    if (metadata.has(key) || value == null) continue;
+    const valid =
+      Array.isArray(value) &&
+      value.length === names.length &&
+      value.every((n) => typeof n === "number" && Number.isFinite(n));
+    if (!valid) {
+      leftovers[key] = value;
+      continue;
+    }
+    let placedAll = true;
+    names.forEach((name, i) => {
+      if (name in cells) placedAll = false;
+      else cells[name] = value[i];
+    });
+    if (!placedAll) leftovers[key] = value;
+  }
+  const percent = brightnessPercent(cells.brightness);
+  if (percent !== null && !("brightness_percent" in cells)) cells.brightness_percent = percent;
+  return { cells, leftovers };
+}
+
+/**
+ * List the attribute columns that hold a value in at least one record, light
+ * columns first and the rest alphabetically.
+ *
+ * @param {{attributes: object}[]} records
+ * @param {Set<string>} metadata keys from metadataKeys()
+ * @returns {string[]}
+ */
+export function buildColumns(records, metadata) {
+  const present = new Set();
+  for (const r of records) {
+    const { cells } = flattenAttributes(r.attributes, metadata);
+    for (const [name, value] of Object.entries(cells)) {
+      if (value !== "") present.add(name);
+    }
+  }
+  const light = LIGHT_COLUMNS.filter((name) => present.has(name));
+  const rest = [...present].filter((name) => !LIGHT_COLUMNS.includes(name)).sort();
+  return [...light, ...rest];
 }
 
 // --- formatting -----------------------------------------------------------
@@ -223,34 +454,125 @@ export function buildFilename(entityId, startMs, endMs, ext, timeZone) {
   return `${base}.${ext}`;
 }
 
+/** Matches text that is a plain number, so a spreadsheet keeps it numeric. */
+const NUMERIC_TEXT = /^-?\d+(\.\d+)?(e[+-]?\d+)?$/i;
+
 /**
  * Escape a single CSV field per RFC-4180, and neutralise spreadsheet formula
- * injection: a field whose first character is one of = + - @ (tab/CR) is
- * prefixed with a single quote so Excel/Sheets treat it as text, not a formula.
+ * injection: a non-numeric field whose first character is one of = + - @ (tab/CR)
+ * is prefixed with a single quote so Excel/Sheets treat it as text, not a
+ * formula. Numbers (including negative ones) are left unprefixed.
  */
 function csvEscape(value) {
   let s = value == null ? "" : String(value);
-  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+  const isNumber = typeof value === "number" ? Number.isFinite(value) : NUMERIC_TEXT.test(s);
+  if (!isNumber && /^[=+\-@\t\r]/.test(s)) s = `'${s}`;
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
 /**
- * Build CSV text (CRLF line endings, RFC-4180 quoting).
- * Plain-language columns: timestamp, value, details (details is a compact JSON
- * string of the extra information recorded alongside the value).
+ * Give the seconds between a record and the one before it, rounded to three
+ * decimal places.
+ *
+ * @param {{timestampMs: number}[]} records oldest-first
+ * @param {number} index position of the record to measure
+ * @returns {number|null} null for the first record
  */
-export function toCsv(records, timeZone) {
-  const lines = ["timestamp,value,details"];
-  for (const r of records) {
+export function secondsSincePrevious(records, index) {
+  if (index === 0) return null;
+  return Math.round(records[index].timestampMs - records[index - 1].timestampMs) / 1000;
+}
+
+/**
+ * Build CSV text with CRLF line endings, one column per setting unless splitColumns is false.
+ *
+ * @param {{timestampMs:number, state:string, attributes:object}[]} records oldest-first
+ * @param {string} [timeZone]
+ * @param {{splitColumns?: boolean}} [options]
+ */
+export function toCsv(records, timeZone, { splitColumns = true } = {}) {
+  if (!splitColumns) {
+    const lines = ["timestamp,value,details"];
+    for (const r of records) {
+      lines.push(
+        [
+          csvEscape(formatTimestamp(r.timestampMs, timeZone)),
+          csvEscape(r.state),
+          csvEscape(JSON.stringify(r.attributes || {})),
+        ].join(",")
+      );
+    }
+    return lines.join("\r\n");
+  }
+  const metadata = metadataKeys(records);
+  const columns = buildColumns(records, metadata);
+  const lines = [
+    ["timestamp", "value", "seconds_since_previous", ...columns, "details"].map(csvEscape).join(","),
+  ];
+  records.forEach((r, index) => {
+    const { cells, leftovers } = flattenAttributes(r.attributes, metadata);
+    const details = Object.keys(leftovers).length ? JSON.stringify(leftovers) : "";
     lines.push(
       [
-        csvEscape(formatTimestamp(r.timestampMs, timeZone)),
-        csvEscape(r.state),
-        csvEscape(JSON.stringify(r.attributes || {})),
-      ].join(",")
+        formatTimestamp(r.timestampMs, timeZone),
+        r.state,
+        secondsSincePrevious(records, index),
+        ...columns.map((name) => cells[name]),
+        details,
+      ]
+        .map(csvEscape)
+        .join(",")
     );
-  }
+  });
   return lines.join("\r\n");
+}
+
+/**
+ * Give the part of an entity id before its first dot.
+ *
+ * @param {string} entityId
+ * @returns {string}
+ */
+function entityDomain(entityId) {
+  const dot = String(entityId).indexOf(".");
+  return dot === -1 ? String(entityId) : String(entityId).slice(0, dot);
+}
+
+/**
+ * Collect each metadata attribute with its value from the most recent record
+ * that has it.
+ *
+ * @param {{attributes: object}[]} records oldest-first
+ * @returns {Record<string, any>}
+ */
+function latestCapabilities(records) {
+  const metadata = metadataKeys(records);
+  const capabilities = {};
+  for (const r of records) {
+    for (const key of Object.keys(r.attributes || {})) {
+      if (metadata.has(key)) capabilities[key] = r.attributes[key];
+    }
+  }
+  return capabilities;
+}
+
+/**
+ * Compute the values derived for one record: whether its value changed, the
+ * gap since the previous record, and brightness as a percentage when known.
+ *
+ * @param {{timestampMs:number, lastChangedMs?:number, attributes:object}[]} records oldest-first
+ * @param {number} index position of the record
+ * @returns {{state_changed: boolean, seconds_since_previous: number|null, brightness_percent?: number}}
+ */
+function deriveValues(records, index) {
+  const r = records[index];
+  const derived = {
+    state_changed: r.lastChangedMs === r.timestampMs,
+    seconds_since_previous: secondsSincePrevious(records, index),
+  };
+  const percent = brightnessPercent((r.attributes || {}).brightness);
+  if (percent !== null) derived.brightness_percent = percent;
+  return derived;
 }
 
 /**
@@ -260,13 +582,20 @@ export function toCsv(records, timeZone) {
  *
  * @param {{entityId:string, friendlyName?:string, exportedAtMs:number,
  *          periodStartMs:number, periodEndMs:number, stateChangesOnly:boolean}} meta
- * @param {{timestampMs:number, state:string, attributes:object}[]} records
+ * @param {{timestampMs:number, lastChangedMs?:number, state:string, attributes:object}[]} records oldest-first
  * @param {string} [timeZone]
  */
 export function buildJsonPayload(meta, records, timeZone) {
+  const friendlyName = meta.friendlyName ?? null;
   return {
     entity_id: meta.entityId,
-    friendly_name: meta.friendlyName ?? null,
+    friendly_name: friendlyName,
+    entity: {
+      entity_id: meta.entityId,
+      friendly_name: friendlyName,
+      domain: entityDomain(meta.entityId),
+      capabilities: latestCapabilities(records),
+    },
     exported_at: formatTimestamp(meta.exportedAtMs, timeZone),
     period: {
       start: formatTimestamp(meta.periodStartMs, timeZone),
@@ -274,10 +603,11 @@ export function buildJsonPayload(meta, records, timeZone) {
     },
     state_changes_only: !!meta.stateChangesOnly,
     record_count: records.length,
-    records: records.map((r) => ({
+    records: records.map((r, index) => ({
       timestamp: formatTimestamp(r.timestampMs, timeZone),
       state: r.state,
       attributes: r.attributes || {},
+      derived: deriveValues(records, index),
     })),
   };
 }

@@ -4,15 +4,19 @@ import assert from "node:assert/strict";
 import {
   PRESET_DAYS,
   buildFilename,
+  buildColumns,
   buildJsonPayload,
   chunkRangeByDay,
   computeRange,
-  filterStateChanges,
+  filterRepeats,
+  flattenAttributes,
   formatDateForFilename,
   formatTimestamp,
+  metadataKeys,
   normaliseRecords,
   parseHistoryRecords,
   sanitizeFilename,
+  secondsSincePrevious,
   toCsv,
   toJson,
   wallClockToEpochMs,
@@ -102,20 +106,54 @@ test("computeRange: presets are anchored to now; custom uses the HA zone", () =>
 
 // --- parseHistoryRecords --------------------------------------------------
 
-test("parseHistoryRecords: maps compressed keys, prefers lc over lu", () => {
+// Checks rows are timed by lu, with lc kept separately as lastChangedMs.
+test("parseHistoryRecords: times rows by lu and keeps lc as lastChangedMs", () => {
   const result = {
     "binary_sensor.front_door": [
       { s: "on", a: { device_class: "door" }, lu: 1768435200, lc: 1768435100 },
-      { s: "off", a: {}, lu: 1768435260 }, // no lc -> uses lu
+      { s: "off", a: {}, lu: 1768435260 }, // no lc -> lastChanged falls back to lu
     ],
   };
   const records = parseHistoryRecords(result, "binary_sensor.front_door");
   assert.equal(records.length, 2);
   assert.equal(records[0].state, "on");
-  assert.equal(records[0].timestampMs, 1768435100 * 1000); // lc wins
+  assert.equal(records[0].timestampMs, 1768435200 * 1000); // lu wins
+  assert.equal(records[0].lastChangedMs, 1768435100 * 1000);
   assert.deepEqual(records[0].attributes, { device_class: "door" });
-  assert.equal(records[1].timestampMs, 1768435260 * 1000); // falls back to lu
+  assert.equal(records[1].timestampMs, 1768435260 * 1000);
+  assert.equal(records[1].lastChangedMs, 1768435260 * 1000); // lc absent -> lu
   assert.deepEqual(records[1].attributes, {});
+});
+
+// Checks a settings ramp sharing one lc yields one distinct-time row per step.
+test("parseHistoryRecords: a brightness ramp with a shared lc keeps distinct timestamps", () => {
+  const T = 1768435000;
+  const rows = [10, 20, 30, 40].map((b, i) => ({
+    s: "on",
+    a: { brightness: b },
+    lu: T + 10 + i,
+    lc: T,
+  }));
+  const records = parseHistoryRecords({ light: rows }, "light");
+  assert.deepEqual(
+    records.map((r) => r.timestampMs),
+    [(T + 10) * 1000, (T + 11) * 1000, (T + 12) * 1000, (T + 13) * 1000]
+  );
+  assert.deepEqual(
+    records.map((r) => r.lastChangedMs),
+    [T * 1000, T * 1000, T * 1000, T * 1000]
+  );
+  assert.equal(normaliseRecords(records).length, 4);
+});
+
+// Checks a row with no numeric lu is skipped even when lc is present.
+test("parseHistoryRecords: skips a row that has lc but no lu", () => {
+  const records = parseHistoryRecords(
+    { e: [{ s: "on", lc: 1000 }, { s: "off", lu: 2000 }] },
+    "e"
+  );
+  assert.equal(records.length, 1);
+  assert.equal(records[0].state, "off");
 });
 
 test("parseHistoryRecords: missing entity or attributes handled", () => {
@@ -170,6 +208,40 @@ test("normaliseRecords: sorts ascending and drops exact boundary duplicates", ()
   );
 });
 
+// Checks two rows sharing a time and state but with different settings both survive.
+test("normaliseRecords: keeps same-time same-value rows whose attributes differ", () => {
+  const out = normaliseRecords([
+    { timestampMs: 1000, state: "on", attributes: { brightness: 10 } },
+    { timestampMs: 1000, state: "on", attributes: { brightness: 20 } },
+  ]);
+  assert.deepEqual(
+    out.map((r) => r.attributes.brightness),
+    [10, 20]
+  );
+});
+
+// Checks attributes that differ only in key order are treated as the same row.
+test("normaliseRecords: drops a duplicate whose attribute keys are in a different order", () => {
+  const out = normaliseRecords([
+    { timestampMs: 1000, state: "on", attributes: { a: 1, b: { x: 1, y: [1, { p: 1, q: 2 }] } } },
+    { timestampMs: 1000, state: "on", attributes: { b: { y: [1, { q: 2, p: 1 }], x: 1 }, a: 1 } },
+  ]);
+  assert.equal(out.length, 1);
+});
+
+// Checks an interleaved duplicate at the same time (A, B, A) is dropped.
+test("normaliseRecords: drops a duplicate separated from its twin by another row at the same time", () => {
+  const out = normaliseRecords([
+    { timestampMs: 1000, state: "on", attributes: { brightness: 10 } },
+    { timestampMs: 1000, state: "on", attributes: { brightness: 20 } },
+    { timestampMs: 1000, state: "on", attributes: { brightness: 10 } },
+  ]);
+  assert.deepEqual(
+    out.map((r) => r.attributes.brightness),
+    [10, 20]
+  );
+});
+
 test("normaliseRecords: de-dups carried-over state across day chunks (real parse path)", () => {
   const T = 1768435200;
   // Chunk 0 ends with the door "on"; chunk 1's include_start_time_state seed
@@ -181,25 +253,77 @@ test("normaliseRecords: de-dups carried-over state across day chunks (real parse
   assert.equal(merged[0].state, "on");
 });
 
-// --- filterStateChanges ---------------------------------------------------
+// --- filterRepeats --------------------------------------------------------
 
-test("filterStateChanges: keeps baseline and transitions only", () => {
+// Checks every setting step is kept and only an exact repeat is dropped.
+test("filterRepeats: keeps brightness and colour steps and drops exact repeats", () => {
   const input = [
-    { timestampMs: 1, state: "on", attributes: {} },
-    { timestampMs: 2, state: "on", attributes: { brightness: 10 } }, // attr-only -> dropped
-    { timestampMs: 3, state: "off", attributes: {} },
-    { timestampMs: 4, state: "off", attributes: {} }, // dropped
-    { timestampMs: 5, state: "on", attributes: {} },
+    { timestampMs: 1, state: "on", attributes: { brightness: 10, rgb_color: [255, 0, 0] } },
+    { timestampMs: 2, state: "on", attributes: { brightness: 20, rgb_color: [255, 0, 0] } },
+    { timestampMs: 3, state: "on", attributes: { brightness: 20, rgb_color: [255, 0, 0] } }, // exact repeat
+    { timestampMs: 4, state: "on", attributes: { brightness: 20, rgb_color: [0, 255, 0] } },
+    { timestampMs: 5, state: "off", attributes: {} },
+    { timestampMs: 6, state: "off", attributes: {} }, // exact repeat
+    { timestampMs: 7, state: "on", attributes: {} },
   ];
-  const out = filterStateChanges(input);
+  const out = filterRepeats(input);
   assert.deepEqual(
-    out.map((r) => r.state),
-    ["on", "off", "on"]
+    out.map((r) => r.timestampMs),
+    [1, 2, 4, 5, 7]
   );
 });
 
-test("filterStateChanges: empty input -> empty output", () => {
-  assert.deepEqual(filterStateChanges([]), []);
+// Checks a change in media position alone counts as a repeat.
+test("filterRepeats: a media position only change is a repeat", () => {
+  const input = [
+    { timestampMs: 1, state: "playing", attributes: { volume_level: 0.5, media_position: 10, media_position_updated_at: "2026-01-01T00:00:00Z" } },
+    { timestampMs: 2, state: "playing", attributes: { volume_level: 0.5, media_position: 40, media_position_updated_at: "2026-01-01T00:00:30Z" } },
+    { timestampMs: 3, state: "playing", attributes: { volume_level: 0.6, media_position: 70, media_position_updated_at: "2026-01-01T00:01:00Z" } },
+  ];
+  const out = filterRepeats(input);
+  assert.deepEqual(
+    out.map((r) => r.timestampMs),
+    [1, 3]
+  );
+});
+
+// Checks attributes with the same content in a different key order are a repeat.
+test("filterRepeats: key order does not make attributes differ", () => {
+  const input = [
+    { timestampMs: 1, state: "on", attributes: { a: 1, b: { x: 1, y: 2 } } },
+    { timestampMs: 2, state: "on", attributes: { b: { y: 2, x: 1 }, a: 1 } },
+  ];
+  assert.equal(filterRepeats(input).length, 1);
+});
+
+// Checks a state change with identical attributes is kept.
+test("filterRepeats: a value change with identical attributes is kept", () => {
+  const input = [
+    { timestampMs: 1, state: "on", attributes: { brightness: 10 } },
+    { timestampMs: 2, state: "off", attributes: { brightness: 10 } },
+  ];
+  assert.equal(filterRepeats(input).length, 2);
+});
+
+// Checks rows missing the volatile attributes, or all attributes, compare by what remains.
+test("filterRepeats: a row lacking media position or attributes is compared on the rest", () => {
+  const input = [
+    { timestampMs: 1, state: "playing", attributes: { volume_level: 0.5, media_position: 10, media_position_updated_at: "2026-01-01T00:00:00Z" } },
+    { timestampMs: 2, state: "playing", attributes: { volume_level: 0.5 } }, // repeat of 1
+    { timestampMs: 3, state: "idle", attributes: {} },
+    { timestampMs: 4, state: "idle", attributes: undefined }, // repeat of 3
+    { timestampMs: 5, state: "idle", attributes: { volume_level: 0.5 } },
+  ];
+  const out = filterRepeats(input);
+  assert.deepEqual(
+    out.map((r) => r.timestampMs),
+    [1, 3, 5]
+  );
+});
+
+// Checks empty input gives empty output.
+test("filterRepeats: empty input -> empty output", () => {
+  assert.deepEqual(filterRepeats([]), []);
 });
 
 // --- formatTimestamp ------------------------------------------------------
@@ -256,46 +380,51 @@ test("buildFilename: entity + date range + extension", () => {
 
 // --- toCsv ----------------------------------------------------------------
 
-test("toCsv: plain-language header, CRLF rows, RFC-4180 escaping of details", () => {
+// Checks the legacy three-column layout, CRLF rows and RFC-4180 escaping of details.
+test("toCsv: legacy layout has a plain-language header, CRLF rows and escaped details", () => {
   const records = [
     { timestampMs: Date.UTC(2026, 0, 15, 0, 0, 0), state: "on", attributes: { friendly_name: "Front, Door" } },
   ];
-  const csv = toCsv(records, "UTC");
+  const csv = toCsv(records, "UTC", { splitColumns: false });
   const lines = csv.split("\r\n");
   assert.equal(lines[0], "timestamp,value,details");
   assert.ok(lines[1].startsWith("2026-01-15T00:00:00+00:00,on,"));
   assert.ok(lines[1].includes('"{""friendly_name"":""Front, Door""}"'));
 });
 
-test("toCsv: escapes commas/quotes/newlines in the value", () => {
+// Checks commas, quotes and newlines in the value are quoted in the legacy layout.
+test("toCsv: legacy layout escapes commas, quotes and newlines in the value", () => {
   const records = [
     { timestampMs: Date.UTC(2026, 0, 15, 0, 0, 0), state: 'a"b,c\nd', attributes: {} },
   ];
-  const csv = toCsv(records, "UTC");
+  const csv = toCsv(records, "UTC", { splitColumns: false });
   const row = csv.split("\r\n")[1];
   assert.ok(row.includes('"a""b,c\nd"'));
 });
 
-test("toCsv: neutralises spreadsheet formula injection", () => {
+// Checks formula-leading text is prefixed in the legacy layout while numbers are left alone.
+test("toCsv: legacy layout neutralises spreadsheet formula injection but keeps numbers", () => {
   const mk = (state) => ({ timestampMs: Date.UTC(2026, 0, 15, 0, 0, 0), state, attributes: {} });
-  const rows = toCsv([mk("=SUM(1+1)"), mk("+1"), mk("-5"), mk("@x"), mk("on")], "UTC").split("\r\n");
+  const rows = toCsv([mk("=SUM(1+1)"), mk("+1"), mk("-x"), mk("@x"), mk("on"), mk("-5")], "UTC", { splitColumns: false }).split("\r\n");
   assert.equal(rows[1], "2026-01-15T00:00:00+00:00,'=SUM(1+1),{}");
   assert.equal(rows[2], "2026-01-15T00:00:00+00:00,'+1,{}");
-  assert.equal(rows[3], "2026-01-15T00:00:00+00:00,'-5,{}");
+  assert.equal(rows[3], "2026-01-15T00:00:00+00:00,'-x,{}");
   assert.equal(rows[4], "2026-01-15T00:00:00+00:00,'@x,{}");
   assert.equal(rows[5], "2026-01-15T00:00:00+00:00,on,{}"); // benign value untouched
+  assert.equal(rows[6], "2026-01-15T00:00:00+00:00,-5,{}"); // a negative number stays numeric
 });
 
-test("toCsv: empty records yields the header line only", () => {
-  assert.equal(toCsv([], "UTC"), "timestamp,value,details");
+// Checks empty input gives only the legacy header.
+test("toCsv: legacy layout with empty records yields the header line only", () => {
+  assert.equal(toCsv([], "UTC", { splitColumns: false }), "timestamp,value,details");
 });
 
 // --- toJson / buildJsonPayload --------------------------------------------
 
 test("buildJsonPayload: self-describing wrapper shape (machine schema keeps HA names)", () => {
   const records = [
-    { timestampMs: Date.UTC(2026, 0, 15, 1, 0, 0), state: "on", attributes: { device_class: "door" } },
-    { timestampMs: Date.UTC(2026, 0, 15, 2, 0, 0), state: "off", attributes: {} },
+    { timestampMs: Date.UTC(2026, 0, 15, 1, 0, 0), lastChangedMs: Date.UTC(2026, 0, 15, 1, 0, 0), state: "on", attributes: { device_class: "door" } },
+    { timestampMs: Date.UTC(2026, 0, 15, 2, 0, 0), lastChangedMs: Date.UTC(2026, 0, 15, 2, 0, 0), state: "off", attributes: {} },
   ];
   const payload = buildJsonPayload(
     {
@@ -319,7 +448,9 @@ test("buildJsonPayload: self-describing wrapper shape (machine schema keeps HA n
     timestamp: "2026-01-15T01:00:00+00:00",
     state: "on",
     attributes: { device_class: "door" },
+    derived: { state_changed: true, seconds_since_previous: null },
   });
+  assert.deepEqual(payload.records[1].derived, { state_changed: true, seconds_since_previous: 3600 });
 });
 
 test("toJson: produces valid, pretty-printed JSON", () => {
@@ -339,4 +470,492 @@ test("toJson: produces valid, pretty-printed JSON", () => {
   const parsed = JSON.parse(json);
   assert.equal(parsed.record_count, 0);
   assert.equal(parsed.friendly_name, null);
+});
+
+// --- settings columns -----------------------------------------------------
+
+/** Build normalised records from compressed rows {s, a, lu}. */
+function recordsFrom(rows) {
+  return parseHistoryRecords({ "x.y": rows }, "x.y");
+}
+
+const LIGHT_META = {
+  friendly_name: "Bedside",
+  supported_color_modes: ["color_temp", "hs", "xy"],
+  supported_features: 40,
+  min_color_temp_kelvin: 2000,
+  max_color_temp_kelvin: 6535,
+  min_mireds: 153,
+  max_mireds: 500,
+};
+
+// A light on in hs mode gives hue, saturation and a derived brightness percent
+test("flattenAttributes: hs light gives hue, saturation and brightness_percent 1.2 for brightness 3", () => {
+  const records = recordsFrom([
+    { s: "on", lu: 1, a: { ...LIGHT_META, brightness: 3, color_mode: "hs", hs_color: [27.5, 63.2] } },
+  ]);
+  const metadata = metadataKeys(records);
+  const { cells, leftovers } = flattenAttributes(records[0].attributes, metadata);
+  assert.deepEqual(cells, {
+    brightness: 3,
+    brightness_percent: 1.2,
+    color_mode: "hs",
+    hue: 27.5,
+    saturation: 63.2,
+  });
+  assert.deepEqual(leftovers, {});
+});
+
+// A colour-mode switch fills color_temp_kelvin first, then hue and saturation
+test("buildColumns: colour-mode switch fills color_temp_kelvin then hue and saturation", () => {
+  const records = recordsFrom([
+    { s: "on", lu: 1, a: { ...LIGHT_META, brightness: 255, color_mode: "color_temp", color_temp_kelvin: 2700, hs_color: null } },
+    { s: "on", lu: 2, a: { ...LIGHT_META, brightness: 128, color_mode: "hs", color_temp_kelvin: null, hs_color: [30, 70] } },
+  ]);
+  const metadata = metadataKeys(records);
+  assert.deepEqual(buildColumns(records, metadata), [
+    "brightness",
+    "brightness_percent",
+    "color_mode",
+    "color_temp_kelvin",
+    "hue",
+    "saturation",
+  ]);
+  assert.deepEqual(flattenAttributes(records[0].attributes, metadata).cells, {
+    brightness: 255,
+    brightness_percent: 100,
+    color_mode: "color_temp",
+    color_temp_kelvin: 2700,
+  });
+  assert.deepEqual(flattenAttributes(records[1].attributes, metadata).cells, {
+    brightness: 128,
+    brightness_percent: 50.2,
+    color_mode: "hs",
+    hue: 30,
+    saturation: 70,
+  });
+});
+
+// An off light (settings all null) leaves every light cell blank
+test("flattenAttributes: an off light row has no cells and no leftovers", () => {
+  const records = recordsFrom([
+    { s: "off", lu: 1, a: { ...LIGHT_META, brightness: null, color_mode: null, color_temp_kelvin: null, hs_color: null, rgb_color: null, xy_color: null } },
+  ]);
+  const { cells, leftovers } = flattenAttributes(records[0].attributes, metadataKeys(records));
+  assert.deepEqual(cells, {});
+  assert.deepEqual(leftovers, {});
+});
+
+// An rgbw light without rgb_color takes red/green/blue/white from rgbw_color, zero kept
+test("flattenAttributes: rgbw without rgb_color gives red, green, blue, white and nothing left over", () => {
+  const records = recordsFrom([
+    { s: "on", lu: 1, a: { ...LIGHT_META, brightness: 255, color_mode: "rgbw", rgbw_color: [165, 136, 0, 88] } },
+  ]);
+  const { cells, leftovers } = flattenAttributes(records[0].attributes, metadataKeys(records));
+  assert.deepEqual(cells, {
+    brightness: 255,
+    brightness_percent: 100,
+    color_mode: "rgbw",
+    red: 165,
+    green: 136,
+    blue: 0,
+    white: 88,
+  });
+  assert.deepEqual(leftovers, {});
+});
+
+// With rgb_color present, rgbw_color keeps its raw values in leftovers but still supplies white
+test("flattenAttributes: rgbw with rgb_color keeps rgbw_color in leftovers", () => {
+  const records = recordsFrom([
+    { s: "on", lu: 1, a: { ...LIGHT_META, color_mode: "rgbw", rgb_color: [255, 200, 100], rgbw_color: [250, 190, 90, 50] } },
+  ]);
+  const { cells, leftovers } = flattenAttributes(records[0].attributes, metadataKeys(records));
+  assert.deepEqual(cells, { color_mode: "rgbw", red: 255, green: 200, blue: 100, white: 50 });
+  assert.deepEqual(leftovers, { rgbw_color: [250, 190, 90, 50] });
+});
+
+// rgbww and xy tuples split into their named columns
+test("flattenAttributes: rgbww and xy tuples split into named columns", () => {
+  const records = recordsFrom([
+    { s: "on", lu: 1, a: { rgbww_color: [10, 20, 30, 40, 50], xy_color: [0.5, 0.25] } },
+  ]);
+  const { cells, leftovers } = flattenAttributes(records[0].attributes, metadataKeys(records));
+  assert.deepEqual(cells, {
+    red: 10,
+    green: 20,
+    blue: 30,
+    cold_white: 40,
+    warm_white: 50,
+    x: 0.5,
+    y: 0.25,
+  });
+  assert.deepEqual(leftovers, {});
+});
+
+// A tuple of the wrong length or with non-numeric members is left in leftovers unchanged
+test("flattenAttributes: malformed tuples go to leftovers without partial cells", () => {
+  const { cells, leftovers } = flattenAttributes(
+    { hs_color: [30], rgb_color: [1, "2", 3], xy_color: [0.1, 0.2, 0.3] },
+    new Set()
+  );
+  assert.deepEqual(cells, {});
+  assert.deepEqual(leftovers, { hs_color: [30], rgb_color: [1, "2", 3], xy_color: [0.1, 0.2, 0.3] });
+});
+
+// A non-numeric brightness is kept as given and gets no derived percent
+test("flattenAttributes: non-numeric brightness has no brightness_percent", () => {
+  const { cells } = flattenAttributes({ brightness: "high" }, new Set());
+  assert.deepEqual(cells, { brightness: "high" });
+});
+
+// Thermostat settings become columns while capability attributes do not
+test("buildColumns: thermostat settings are columns, hvac_modes and min_temp are not", () => {
+  const attrs = {
+    friendly_name: "Hallway",
+    hvac_modes: ["off", "heat"],
+    min_temp: 7,
+    max_temp: 35,
+    target_temp_step: 0.5,
+    supported_features: 17,
+  };
+  const records = recordsFrom([
+    { s: "heat", lu: 1, a: { ...attrs, current_temperature: -3.5, temperature: 21, hvac_action: "heating" } },
+    { s: "heat", lu: 2, a: { ...attrs, current_temperature: -3, temperature: 21, hvac_action: "idle" } },
+  ]);
+  const metadata = metadataKeys(records);
+  assert.deepEqual([...metadata].sort(), [
+    "friendly_name",
+    "hvac_modes",
+    "max_temp",
+    "min_temp",
+    "supported_features",
+    "target_temp_step",
+  ]);
+  assert.deepEqual(buildColumns(records, metadata), ["current_temperature", "hvac_action", "temperature"]);
+  const { cells, leftovers } = flattenAttributes(records[0].attributes, metadata);
+  assert.deepEqual(cells, { current_temperature: -3.5, hvac_action: "heating", temperature: 21 });
+  assert.deepEqual(leftovers, {});
+});
+
+// A metadata-looking attribute that varies gets a column, while a constant sibling stays metadata
+test("metadataKeys: a varying max_value is not metadata but a constant min_value is", () => {
+  const records = recordsFrom([
+    { s: "3", lu: 1, a: { min_value: 0, max_value: 5 } },
+    { s: "4", lu: 2, a: { min_value: 0, max_value: 7 } },
+  ]);
+  const metadata = metadataKeys(records);
+  assert.deepEqual([...metadata], ["min_value"]);
+  assert.deepEqual(buildColumns(records, metadata), ["max_value"]);
+  assert.deepEqual(flattenAttributes(records[1].attributes, metadata).cells, { max_value: 7 });
+});
+
+// A known metadata name that varies (friendly_name renamed) also gets a column
+test("metadataKeys: a renamed friendly_name is not metadata", () => {
+  const records = recordsFrom([
+    { s: "on", lu: 1, a: { friendly_name: "Lamp" } },
+    { s: "on", lu: 2, a: { friendly_name: "Lamp 2" } },
+  ]);
+  const metadata = metadataKeys(records);
+  assert.equal(metadata.size, 0);
+  assert.deepEqual(buildColumns(records, metadata), ["friendly_name"]);
+});
+
+// Records lacking a metadata key are ignored when checking it is constant
+test("metadataKeys: records without the key do not make it vary", () => {
+  const records = recordsFrom([
+    { s: "on", lu: 1, a: { icon: "mdi:lamp" } },
+    { s: "on", lu: 2, a: {} },
+    { s: "on", lu: 3, a: { icon: "mdi:lamp" } },
+  ]);
+  assert.deepEqual([...metadataKeys(records)], ["icon"]);
+});
+
+// A plain sensor carrying only descriptive attributes yields no extra columns
+test("buildColumns: a sensor with only metadata has no attribute columns", () => {
+  const meta = { friendly_name: "Outdoor", unit_of_measurement: "C", device_class: "temperature", state_class: "measurement" };
+  const records = recordsFrom([
+    { s: "-3.5", lu: 1, a: meta },
+    { s: "-3.0", lu: 2, a: meta },
+  ]);
+  const metadata = metadataKeys(records);
+  assert.equal(metadata.size, 4);
+  assert.deepEqual(buildColumns(records, metadata), []);
+});
+
+// Objects go to leftovers, scalar lists become compact JSON, nulls are dropped
+test("flattenAttributes: objects to leftovers, scalar lists to JSON text, nulls omitted", () => {
+  const { cells, leftovers } = flattenAttributes(
+    {
+      effect_list: ["a", "b"],
+      tags: ["a", 2, true],
+      none: [],
+      nothing: null,
+      flag: false,
+      nested: { a: 1 },
+      mixed: [{ a: 1 }],
+      grid: [[1, 2]],
+    },
+    new Set(["effect_list"])
+  );
+  assert.deepEqual(cells, { tags: '["a",2,true]', none: "[]", flag: false });
+  assert.deepEqual(leftovers, { nested: { a: 1 }, mixed: [{ a: 1 }], grid: [[1, 2]] });
+});
+
+// Attributes named like a fixed column are prefixed in both cells and columns
+test("flattenAttributes and buildColumns: fixed-column names get the attribute_ prefix", () => {
+  const records = recordsFrom([
+    { s: "on", lu: 1, a: { value: 1, timestamp: "t", details: "d", changed_by: "me", seconds_since_previous: 9, zeta: 1 } },
+  ]);
+  const metadata = metadataKeys(records);
+  assert.deepEqual(flattenAttributes(records[0].attributes, metadata).cells, {
+    attribute_value: 1,
+    attribute_timestamp: "t",
+    attribute_details: "d",
+    attribute_changed_by: "me",
+    attribute_seconds_since_previous: 9,
+    zeta: 1,
+  });
+  assert.deepEqual(buildColumns(records, metadata), [
+    "attribute_changed_by",
+    "attribute_details",
+    "attribute_seconds_since_previous",
+    "attribute_timestamp",
+    "attribute_value",
+    "zeta",
+  ]);
+});
+
+// Light columns come first in briefing order, then other columns alphabetically
+test("buildColumns: light columns precede the alphabetical rest", () => {
+  const records = recordsFrom([
+    { s: "on", lu: 1, a: { effect: "rainbow", brightness: 10, color_mode: "xy", xy_color: [0.1, 0.2], rgbww_color: [1, 2, 3, 4, 5], rgbw_color: [1, 2, 3, 4], hs_color: [1, 2], color_temp_kelvin: 3000, alpha: 1 } },
+  ]);
+  assert.deepEqual(buildColumns(records, metadataKeys(records)), [
+    "brightness",
+    "brightness_percent",
+    "color_mode",
+    "color_temp_kelvin",
+    "hue",
+    "saturation",
+    "red",
+    "green",
+    "blue",
+    "white",
+    "cold_white",
+    "warm_white",
+    "x",
+    "y",
+    "alpha",
+    "effect",
+  ]);
+});
+
+// A column whose only values are empty strings is not included
+test("buildColumns: an attribute that is always an empty string gets no column", () => {
+  const records = recordsFrom([
+    { s: "on", lu: 1, a: { effect: "" } },
+    { s: "on", lu: 2, a: { effect: "" } },
+  ]);
+  assert.deepEqual(buildColumns(records, metadataKeys(records)), []);
+});
+
+// --- split CSV ------------------------------------------------------------
+
+const BASE = 1768435200; // 2026-01-15T00:00:00Z
+
+/** Bedside light rows: a value change then two settings-only steps. */
+function bedsideRecords() {
+  return recordsFrom([
+    { s: "on", lu: BASE, a: { ...LIGHT_META, brightness: 3, color_mode: "hs", hs_color: [27.5, 63.2], rgb_color: [255, 150, 100], xy_color: [0.5, 0.4] } },
+    { s: "on", lu: BASE + 30, lc: BASE, a: { ...LIGHT_META, brightness: 20, color_mode: "hs", hs_color: [28, 63.2], rgb_color: [255, 152, 100], xy_color: [0.5, 0.4] } },
+    { s: "on", lu: BASE + 60.25, lc: BASE, a: { ...LIGHT_META, brightness: 255, color_mode: "hs", hs_color: [30, 70], rgb_color: [255, 170, 76], xy_color: [0.45, 0.41] } },
+  ]);
+}
+
+// Checks the secondsSincePrevious helper returns null first, then a 3 decimal place gap.
+test("secondsSincePrevious: null for the first record and the gap rounded to 3 decimals after", () => {
+  const records = [{ timestampMs: 0 }, { timestampMs: 1234.5678 }, { timestampMs: 31234.5678 }];
+  assert.equal(secondsSincePrevious(records, 0), null);
+  assert.equal(secondsSincePrevious(records, 1), 1.235);
+  assert.equal(secondsSincePrevious(records, 2), 30);
+});
+
+// Checks the bedside light gives the exact split header and rows, settings-only steps included.
+test("toCsv: split layout writes the bedside light's settings in named columns", () => {
+  const rows = toCsv(bedsideRecords(), "UTC").split("\r\n");
+  assert.equal(
+    rows[0],
+    "timestamp,value,seconds_since_previous,brightness,brightness_percent,color_mode,hue,saturation,red,green,blue,x,y,details"
+  );
+  assert.equal(rows[1], "2026-01-15T00:00:00+00:00,on,,3,1.2,hs,27.5,63.2,255,150,100,0.5,0.4,");
+  assert.equal(rows[2], "2026-01-15T00:00:30+00:00,on,30,20,7.8,hs,28,63.2,255,152,100,0.5,0.4,");
+  assert.equal(rows[3], "2026-01-15T00:01:00+00:00,on,30.25,255,100,hs,30,70,255,170,76,0.45,0.41,");
+  assert.equal(rows.length, 4);
+});
+
+// Checks split is the default and an explicit true gives the same output.
+test("toCsv: split layout is the default", () => {
+  const records = bedsideRecords();
+  assert.equal(toCsv(records, "UTC"), toCsv(records, "UTC", { splitColumns: true }));
+  assert.notEqual(toCsv(records, "UTC"), toCsv(records, "UTC", { splitColumns: false }));
+});
+
+// Checks details holds the compact JSON of leftovers and is blank when there are none.
+test("toCsv: split layout puts leftovers in details and leaves it blank otherwise", () => {
+  const records = recordsFrom([
+    { s: "on", lu: BASE, a: { color_mode: "rgbw", rgb_color: [255, 200, 100], rgbw_color: [250, 190, 90, 50] } },
+    { s: "off", lu: BASE + 5, a: {} },
+  ]);
+  const rows = toCsv(records, "UTC").split("\r\n");
+  assert.equal(rows[0], "timestamp,value,seconds_since_previous,color_mode,red,green,blue,white,details");
+  assert.equal(rows[1], '2026-01-15T00:00:00+00:00,on,,rgbw,255,200,100,50,"{""rgbw_color"":[250,190,90,50]}"');
+  assert.equal(rows[2], "2026-01-15T00:00:05+00:00,off,5,,,,,,");
+});
+
+// Checks negative numbers in a column and in the value stay numeric.
+test("toCsv: split layout keeps -3.5 numeric in a column and as the value", () => {
+  const thermostat = recordsFrom([
+    { s: "heat", lu: BASE, a: { friendly_name: "Hall", hvac_modes: ["off", "heat"], current_temperature: -3.5, temperature: 21, hvac_action: "heating" } },
+  ]);
+  assert.deepEqual(toCsv(thermostat, "UTC").split("\r\n"), [
+    "timestamp,value,seconds_since_previous,current_temperature,hvac_action,temperature,details",
+    "2026-01-15T00:00:00+00:00,heat,,-3.5,heating,21,",
+  ]);
+  const sensor = recordsFrom([
+    { s: "-3.5", lu: BASE, a: { unit_of_measurement: "C" } },
+    { s: "-3.0", lu: BASE + 60, a: { unit_of_measurement: "C" } },
+  ]);
+  assert.deepEqual(toCsv(sensor, "UTC").split("\r\n"), [
+    "timestamp,value,seconds_since_previous,details",
+    "2026-01-15T00:00:00+00:00,-3.5,,",
+    "2026-01-15T00:01:00+00:00,-3.0,60,",
+  ]);
+});
+
+// Checks formula-leading text in the value and in a column is still prefixed.
+test("toCsv: split layout still neutralises =cmd and other formula text", () => {
+  const records = recordsFrom([
+    { s: "=cmd", lu: BASE, a: { effect: "=cmd", note: "-abc", other: "+1", num: "-5abc", neg: "-1.5e-3" } },
+  ]);
+  const rows = toCsv(records, "UTC").split("\r\n");
+  assert.equal(rows[0], "timestamp,value,seconds_since_previous,effect,neg,note,num,other,details");
+  assert.equal(rows[1], "2026-01-15T00:00:00+00:00,'=cmd,,'=cmd,-1.5e-3,'-abc,'-5abc,'+1,");
+});
+
+// Checks header names that need quoting or neutralising go through the same escaping as the rows.
+test("toCsv: split layout escapes attribute names in the header row", () => {
+  const records = recordsFrom([{ s: "on", lu: BASE, a: { "a,b": 1, "=cmd": 2 } }]);
+  const rows = toCsv(records, "UTC").split("\r\n");
+  assert.equal(rows[0], "timestamp,value,seconds_since_previous,'=cmd,\"a,b\",details");
+  assert.equal(rows[1], "2026-01-15T00:00:00+00:00,on,,2,1,");
+});
+
+// Checks a real attribute named attribute_<name> goes to details instead of overwriting the renamed cell.
+test("flattenAttributes and toCsv: a colliding attribute_ name goes to details", () => {
+  const records = recordsFrom([{ s: "on", lu: BASE, a: { value: 1, attribute_value: 2 } }]);
+  const { cells, leftovers } = flattenAttributes(records[0].attributes, metadataKeys(records));
+  assert.deepEqual(cells, { attribute_value: 1 });
+  assert.deepEqual(leftovers, { attribute_value: 2 });
+  const rows = toCsv(records, "UTC").split("\r\n");
+  assert.equal(rows[0], "timestamp,value,seconds_since_previous,attribute_value,details");
+  assert.equal(rows[1], '2026-01-15T00:00:00+00:00,on,,1,"{""attribute_value"":2}"');
+});
+
+// Checks a constant humidifier mode is a setting and gets its own column.
+test("toCsv: a humidifier's constant mode gets a column", () => {
+  const records = recordsFrom([
+    { s: "on", lu: BASE, a: { mode: "auto", humidity: 50 } },
+    { s: "on", lu: BASE + 60, lc: BASE, a: { mode: "auto", humidity: 55 } },
+  ]);
+  assert.deepEqual(toCsv(records, "UTC").split("\r\n"), [
+    "timestamp,value,seconds_since_previous,humidity,mode,details",
+    "2026-01-15T00:00:00+00:00,on,,50,auto,",
+    "2026-01-15T00:01:00+00:00,on,60,55,auto,",
+  ]);
+});
+
+// Checks empty input gives the split header with no attribute columns.
+test("toCsv: split layout with empty records yields the header line only", () => {
+  assert.equal(toCsv([], "UTC"), "timestamp,value,seconds_since_previous,details");
+});
+
+// --- JSON entity and derived ----------------------------------------------
+
+const JSON_META = {
+  entityId: "light.bedside",
+  friendlyName: "Bedside",
+  exportedAtMs: (BASE + 3600) * 1000,
+  periodStartMs: BASE * 1000,
+  periodEndMs: (BASE + 3600) * 1000,
+  stateChangesOnly: false,
+};
+
+// Checks the entity block carries id, name, domain and capabilities.
+test("buildJsonPayload: entity block has entity_id, friendly_name, domain and capabilities", () => {
+  const payload = buildJsonPayload(JSON_META, bedsideRecords(), "UTC");
+  assert.deepEqual(payload.entity, {
+    entity_id: "light.bedside",
+    friendly_name: "Bedside",
+    domain: "light",
+    capabilities: {
+      friendly_name: "Bedside",
+      supported_color_modes: ["color_temp", "hs", "xy"],
+      supported_features: 40,
+      min_color_temp_kelvin: 2000,
+      max_color_temp_kelvin: 6535,
+      min_mireds: 153,
+      max_mireds: 500,
+    },
+  });
+  assert.equal(payload.entity_id, "light.bedside");
+});
+
+// Checks capabilities take each key from the latest record that has it.
+test("buildJsonPayload: capabilities come from the latest record that has each key", () => {
+  const records = recordsFrom([
+    { s: "on", lu: BASE, a: { icon: "mdi:lamp", supported_color_modes: ["hs"] } },
+    { s: "off", lu: BASE + 10, a: { supported_color_modes: ["hs"] } },
+  ]);
+  const payload = buildJsonPayload(JSON_META, records, "UTC");
+  assert.deepEqual(payload.entity.capabilities, { icon: "mdi:lamp", supported_color_modes: ["hs"] });
+});
+
+// Checks a null friendly name, no dot in the id and no records.
+test("buildJsonPayload: entity block handles a missing name, a dotless id and no records", () => {
+  const payload = buildJsonPayload({ ...JSON_META, entityId: "plain", friendlyName: undefined }, [], "UTC");
+  assert.deepEqual(payload.entity, { entity_id: "plain", friendly_name: null, domain: "plain", capabilities: {} });
+  assert.equal(buildJsonPayload({ ...JSON_META, entityId: "a.b.c" }, [], "UTC").entity.domain, "a");
+});
+
+// Checks a settings-only row reads state_changed false and carries derived values.
+test("buildJsonPayload: settings-only rows have state_changed false and exact derived values", () => {
+  const payload = buildJsonPayload(JSON_META, bedsideRecords(), "UTC");
+  assert.deepEqual(payload.records.map((r) => r.derived), [
+    { state_changed: true, seconds_since_previous: null, brightness_percent: 1.2 },
+    { state_changed: false, seconds_since_previous: 30, brightness_percent: 7.8 },
+    { state_changed: false, seconds_since_previous: 30.25, brightness_percent: 100 },
+  ]);
+  assert.deepEqual(payload.records[1].attributes, bedsideRecords()[1].attributes);
+});
+
+// Checks brightness_percent is left out unless brightness is a finite number.
+test("buildJsonPayload: brightness_percent is only present for a numeric brightness", () => {
+  const records = recordsFrom([
+    { s: "off", lu: BASE, a: { brightness: null } },
+    { s: "on", lu: BASE + 1, a: { brightness: "high" } },
+    { s: "on", lu: BASE + 2, a: { brightness: 0 } },
+    { s: "on", lu: BASE + 3, a: {} },
+  ]);
+  const derived = buildJsonPayload(JSON_META, records, "UTC").records.map((r) => r.derived);
+  assert.deepEqual(derived[0], { state_changed: true, seconds_since_previous: null });
+  assert.deepEqual(derived[1], { state_changed: true, seconds_since_previous: 1 });
+  assert.deepEqual(derived[2], { state_changed: true, seconds_since_previous: 1, brightness_percent: 0 });
+  assert.deepEqual(derived[3], { state_changed: true, seconds_since_previous: 1 });
+});
+
+// Checks toJson passes the new blocks through.
+test("toJson: includes the entity block and derived values", () => {
+  const parsed = JSON.parse(toJson(JSON_META, bedsideRecords(), "UTC"));
+  assert.equal(parsed.entity.domain, "light");
+  assert.equal(parsed.records[1].derived.state_changed, false);
 });

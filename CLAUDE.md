@@ -7,9 +7,12 @@ Guidance for Claude Code (and humans) working in this repo.
 A HACS-distributed Home Assistant **custom integration** that adds one **sidebar
 panel** for exporting a single entity's history to **CSV** or **JSON**. The
 primary consumer of the output is an LLM, so the data is dumped faithfully (with
-an optional "skip repeats" filter), never aggregated or interpreted.
+an optional "skip repeats" filter that keeps any row where the value or a
+setting changed), never aggregated or interpreted. The CSV gives each setting its
+own column by default (`timestamp,value,seconds_since_previous,<settings>,details`).
 
-Design doc: `docs/plans/2026-05-31-ha-activity-exporter-design.md`
+Design docs: `docs/plans/2026-05-31-ha-activity-exporter-design.md`, then
+`docs/plans/2026-10-25-settings-detail-export-design.md` (settings columns, which supersedes parts of it)
 Plan + built-vs-intended notes: `.ai/implementation-plans/ha-activity-exporter.md`
 
 ## Architecture (one sentence)
@@ -34,7 +37,8 @@ custom_components/ha_activity_exporter/
 
 1. **Plain language, zero HA jargon in the UI.** The target audience does not
    know Home Assistant. Never expose "entity", "state", "recorder", or
-   "significant changes" in visible copy. (The CSV header is `timestamp,value,details`;
+   "significant changes" in visible copy. (The CSV header starts `timestamp,value`, and is
+   exactly `timestamp,value,details` when per-setting columns are off;
    the JSON payload keeps faithful HA keys — `state`, `attributes` — as a stable
    machine schema for LLMs.)
 2. **No build step, no CDN/runtime deps in the frontend.** It must work on
@@ -61,7 +65,9 @@ custom_components/ha_activity_exporter/
 - History WS command `history/history_during_period` returns the **compressed**
   format keyed by entity_id: rows use `s` (state), `a` (attributes), `lu`
   (last_updated, epoch **seconds float**), `lc` (last_changed, present only when
-  `!= lu`). Timestamps are epoch seconds, not ISO. Fetch per day-chunk with
+  `!= lu`). Timestamps are epoch seconds, not ISO. Time rows by `lu` (always
+  present); `lc` is the earlier moment the value last changed, so a settings-only
+  row (brightness step, colour step) has `lc` < `lu`. Fetch per day-chunk with
   `include_start_time_state` only on the first chunk to avoid duplicate boundary rows.
 - `single_config_entry: true` in the manifest makes core handle single-instance
   (aborts the second flow, hides "Add") — no manual guard needed.
