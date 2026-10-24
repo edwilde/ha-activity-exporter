@@ -152,6 +152,7 @@ class ActivityExporterPanel extends HTMLElement {
     this._customStart = "";
     this._customEnd = "";
     this._skipRepeats = false;
+    this._splitColumns = true;
 
     // Cache of raw (unfiltered) records keyed by entity+range, so switching
     // format or toggling "skip repeats" never refetches.
@@ -226,7 +227,17 @@ class ActivityExporterPanel extends HTMLElement {
             <input type="checkbox" id="skip-repeats" />
             <span class="toggle-text">
               <span class="label">Skip repeats — only show when something actually changed</span>
-              <span class="help" style="margin:2px 0 0;">Keeps your file clean by leaving out rows where nothing changed.</span>
+              <span class="help" style="margin:2px 0 0;">Leaves out rows where neither the value nor any setting changed.</span>
+            </span>
+          </label>
+        </div>
+
+        <div class="field">
+          <label class="toggle-row">
+            <input type="checkbox" id="split-columns" checked />
+            <span class="toggle-text">
+              <span class="label">Give each setting its own column</span>
+              <span class="help" style="margin:2px 0 0;">Puts things like brightness, colour and temperature in separate spreadsheet columns. Turn off for a simple three-column file.</span>
             </span>
           </label>
         </div>
@@ -258,6 +269,7 @@ class ActivityExporterPanel extends HTMLElement {
       startDate: root.getElementById("start-date"),
       endDate: root.getElementById("end-date"),
       skipRepeats: root.getElementById("skip-repeats"),
+      splitColumns: root.getElementById("split-columns"),
       csvBtn: root.getElementById("export-csv"),
       jsonBtn: root.getElementById("export-json"),
       progress: root.getElementById("progress"),
@@ -282,6 +294,10 @@ class ActivityExporterPanel extends HTMLElement {
     this._els.skipRepeats.addEventListener("change", (e) => {
       this._skipRepeats = e.target.checked;
       // Clear any stale "downloaded N rows" banner from a previous export.
+      this._updateButtons();
+    });
+    this._els.splitColumns.addEventListener("change", (e) => {
+      this._splitColumns = e.target.checked;
       this._updateButtons();
     });
     this._els.csvBtn.addEventListener("click", () => this._export("csv"));
@@ -545,7 +561,7 @@ class ActivityExporterPanel extends HTMLElement {
     let mime;
     let ext;
     if (format === "csv") {
-      content = toCsv(finalRecords, timeZone);
+      content = toCsv(finalRecords, timeZone, { splitColumns: this._splitColumns });
       mime = "text/csv;charset=utf-8";
       ext = "csv";
     } else {
