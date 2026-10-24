@@ -44,6 +44,7 @@ const STYLES = `
     margin: 0 auto;
     color: var(--primary-text-color);
     font-family: var(--paper-font-body1_-_font-family, Roboto, sans-serif);
+    --ae-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
   }
   .card {
     background: var(--card-background-color, #fff);
@@ -54,11 +55,13 @@ const STYLES = `
   h1 { font-size: 1.4rem; margin: 0 0 4px; font-weight: 500; }
   .intro { color: var(--secondary-text-color); margin: 0 0 24px; line-height: 1.5; }
   .field { margin-bottom: 24px; }
-  .field > label.title {
+  fieldset.field { border: 0; padding: 0; margin: 0 0 24px; min-width: 0; }
+  .title {
     display: block;
     font-weight: 500;
     margin-bottom: 6px;
     font-size: 1.02rem;
+    padding: 0;
   }
   .help { color: var(--secondary-text-color); font-size: 0.85rem; margin: 4px 0 10px; line-height: 1.4; }
   ha-entity-picker, .entity-fallback input { width: 100%; box-sizing: border-box; }
@@ -68,6 +71,7 @@ const STYLES = `
     border-radius: 8px;
     background: var(--secondary-background-color, #fafafa);
     color: var(--primary-text-color);
+    font: inherit;
     font-size: 1rem;
   }
   .presets { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -78,8 +82,9 @@ const STYLES = `
     border-radius: 999px;
     padding: 8px 16px;
     cursor: pointer;
+    font: inherit;
     font-size: 0.95rem;
-    transition: background 0.15s, border-color 0.15s;
+    transition: background-color 0.15s var(--ae-ease-out), border-color 0.15s var(--ae-ease-out), color 0.15s var(--ae-ease-out);
   }
   .chip:hover { border-color: var(--primary-color); }
   .chip[aria-pressed="true"] {
@@ -95,23 +100,25 @@ const STYLES = `
     width: 100%; box-sizing: border-box; padding: 10px;
     border: 1px solid var(--divider-color, #ccc); border-radius: 8px;
     background: var(--secondary-background-color, #fafafa);
-    color: var(--primary-text-color); font-size: 0.95rem;
+    color: var(--primary-text-color); font: inherit; font-size: 0.95rem;
   }
   .toggle-row { display: flex; align-items: flex-start; gap: 12px; cursor: pointer; }
   .toggle-row input { margin-top: 3px; width: 18px; height: 18px; accent-color: var(--primary-color); flex: none; }
-  .toggle-text .label { font-weight: 500; }
+  .toggle-text .label { display: block; font-weight: 500; }
+  .toggle-text .toggle-help { display: block; margin: 2px 0 0; }
   .actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; }
   button.export {
     flex: 1 1 220px;
     padding: 14px 18px;
     border: none;
     border-radius: 10px;
+    font: inherit;
     font-size: 1rem;
     font-weight: 500;
     cursor: pointer;
     background: var(--primary-color);
     color: var(--text-primary-color, #fff);
-    transition: opacity 0.15s, filter 0.15s;
+    transition: filter 0.15s var(--ae-ease-out), background-color 0.15s var(--ae-ease-out);
   }
   button.export.secondary {
     background: var(--secondary-background-color, #eee);
@@ -119,26 +126,36 @@ const STYLES = `
     border: 1px solid var(--divider-color, #ccc);
   }
   button.export:hover:not([disabled]) { filter: brightness(0.95); }
-  button.export[disabled] { opacity: 0.5; cursor: not-allowed; }
+  button.export[disabled],
+  button.export.secondary[disabled] {
+    background: var(--secondary-background-color, #eee);
+    color: var(--secondary-text-color);
+    border: 1px solid var(--divider-color, #ccc);
+    opacity: 1;
+    cursor: not-allowed;
+  }
   button.export .note { display: block; font-weight: 400; font-size: 0.78rem; opacity: 0.85; margin-top: 2px; }
   .progress { margin-top: 20px; display: none; }
   .progress.show { display: block; }
   .progress .track { height: 8px; background: var(--divider-color, #ddd); border-radius: 999px; overflow: hidden; }
-  .progress .bar { height: 100%; width: 0%; background: var(--primary-color); transition: width 0.2s; }
+  .progress .bar { height: 100%; width: 100%; background: var(--primary-color); transform: scaleX(0); transform-origin: left; transition: transform 0.2s var(--ae-ease-out); }
   .progress .label { font-size: 0.85rem; color: var(--secondary-text-color); margin-top: 8px; }
-  /* Status uses a high-contrast text colour plus a coloured left border, so
-     meaning is never conveyed by colour alone and text always meets contrast. */
-  .status { margin-top: 20px; padding: 14px 16px; border-radius: 10px; font-size: 0.92rem; line-height: 1.45; display: none; color: var(--primary-text-color); border-left: 4px solid var(--divider-color, #ccc); }
+  /* Status uses a high-contrast text colour on a tinted, thinly outlined box,
+     so meaning is carried by the text and never by colour alone. */
+  .status { margin-top: 20px; padding: 14px 16px; border-radius: 10px; font-size: 0.92rem; line-height: 1.45; display: none; color: var(--primary-text-color); border: 1px solid var(--divider-color, #ccc); }
   .status.show { display: block; }
-  .status.error { background: rgba(var(--rgb-error-color, 219,68,55), 0.12); border-left-color: var(--error-color, #db4437); }
-  .status.empty { background: var(--secondary-background-color, #f3f3f3); border-left-color: var(--divider-color, #ccc); }
-  .status.success { background: rgba(var(--rgb-success-color, 67,160,71), 0.12); border-left-color: var(--success-color, #43a047); }
-  .status.warn { background: rgba(var(--rgb-warning-color, 255,160,0), 0.14); border-left-color: var(--warning-color, #ffa000); }
+  .status.error { background: rgba(var(--rgb-error-color, 219,68,55), 0.12); border-color: rgba(var(--rgb-error-color, 219,68,55), 0.5); }
+  .status.empty { background: var(--secondary-background-color, #f3f3f3); border-color: var(--divider-color, #ccc); }
+  .status.success { background: rgba(var(--rgb-success-color, 67,160,71), 0.12); border-color: rgba(var(--rgb-success-color, 67,160,71), 0.5); }
+  .status.warn { background: rgba(var(--rgb-warning-color, 255,160,0), 0.14); border-color: rgba(var(--rgb-warning-color, 255,160,0), 0.5); }
   /* Visible keyboard focus on every interactive control. */
   .chip:focus-visible, button.export:focus-visible, .toggle-row input:focus-visible { outline: 2px solid var(--primary-text-color); outline-offset: 2px; }
   .chip[aria-pressed="true"]:focus-visible, #export-csv:focus-visible { outline-color: var(--text-primary-color, #fff); }
   :host(.narrow) .card { padding: 16px; }
   :host(.narrow) button.export { flex-basis: 100%; }
+  @media (prefers-reduced-motion: reduce) {
+    .chip, button.export, .progress .bar { transition: none; }
+  }
 `;
 
 class ActivityExporterPanel extends HTMLElement {
@@ -210,10 +227,10 @@ class ActivityExporterPanel extends HTMLElement {
           <div id="entity-control"></div>
         </div>
 
-        <div class="field">
-          <span class="title">Time period</span>
+        <fieldset class="field">
+          <legend class="title">Time period</legend>
           <p class="help">Choose how far back to look.</p>
-          <div class="presets" role="group" aria-label="Time period"></div>
+          <div class="presets"></div>
           <div class="custom-dates" id="custom-dates">
             <div class="date-field">
               <label for="start-date">From</label>
@@ -224,14 +241,14 @@ class ActivityExporterPanel extends HTMLElement {
               <input type="datetime-local" id="end-date" />
             </div>
           </div>
-        </div>
+        </fieldset>
 
         <div class="field">
           <label class="toggle-row">
             <input type="checkbox" id="skip-repeats" />
             <span class="toggle-text">
-              <span class="label">Skip repeats — only show when something actually changed</span>
-              <span class="help" style="margin:2px 0 0;">Leaves out rows where neither the value nor any setting changed.</span>
+              <span class="label">Skip repeats</span>
+              <span class="help toggle-help">Leave out rows where neither the value nor any setting changed.</span>
             </span>
           </label>
         </div>
@@ -241,7 +258,7 @@ class ActivityExporterPanel extends HTMLElement {
             <input type="checkbox" id="split-columns" checked />
             <span class="toggle-text">
               <span class="label">Give each setting its own column</span>
-              <span class="help" style="margin:2px 0 0;">Puts things like brightness, colour and temperature in separate spreadsheet columns. Turn off for a simple three-column file.</span>
+              <span class="help toggle-help">Puts things like brightness, colour and temperature in separate spreadsheet columns. Turn off for a simple three-column file.</span>
             </span>
           </label>
         </div>
@@ -503,14 +520,14 @@ class ActivityExporterPanel extends HTMLElement {
 
   _setProgress(percent, label) {
     this._els.progress.classList.add("show");
-    this._els.progressBar.style.width = `${percent}%`;
+    this._els.progressBar.style.transform = `scaleX(${percent / 100})`;
     this._els.progressTrack.setAttribute("aria-valuenow", String(percent));
     if (label) this._els.progressLabel.textContent = label;
   }
 
   _hideProgress() {
     this._els.progress.classList.remove("show");
-    this._els.progressBar.style.width = "0%";
+    this._els.progressBar.style.transform = "scaleX(0)";
     this._els.progressTrack.setAttribute("aria-valuenow", "0");
   }
 
