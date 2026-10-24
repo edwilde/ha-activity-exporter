@@ -104,5 +104,5 @@ directly (only `http` set up) so it stays fast and does not depend on the heavy
 ## Conventions
 
 - Commit per logical change; keep CI green. Bump `manifest.json` `version` for
-  user-visible changes and tag releases (`vX.Y.Z`).
+  user-visible changes and tag releases with the bare version (`X.Y.Z`, no `v` prefix).
 - Tracked in ticketgraph (project `ha-activity-exporter`) — snapshot at `.ai/TICKETS.md`.
