@@ -4,12 +4,15 @@ import assert from "node:assert/strict";
 import {
   PRESET_DAYS,
   buildFilename,
+  buildColumns,
   buildJsonPayload,
   chunkRangeByDay,
   computeRange,
   filterRepeats,
+  flattenAttributes,
   formatDateForFilename,
   formatTimestamp,
+  metadataKeys,
   normaliseRecords,
   parseHistoryRecords,
   sanitizeFilename,
@@ -430,4 +433,291 @@ test("toJson: produces valid, pretty-printed JSON", () => {
   const parsed = JSON.parse(json);
   assert.equal(parsed.record_count, 0);
   assert.equal(parsed.friendly_name, null);
+});
+
+// --- settings columns -----------------------------------------------------
+
+/** Build normalised records from compressed rows {s, a, lu}. */
+function recordsFrom(rows) {
+  return parseHistoryRecords({ "x.y": rows }, "x.y");
+}
+
+const LIGHT_META = {
+  friendly_name: "Bedside",
+  supported_color_modes: ["color_temp", "hs", "xy"],
+  supported_features: 40,
+  min_color_temp_kelvin: 2000,
+  max_color_temp_kelvin: 6535,
+  min_mireds: 153,
+  max_mireds: 500,
+};
+
+// A light on in hs mode gives hue, saturation and a derived brightness percent
+test("flattenAttributes: hs light gives hue, saturation and brightness_percent 1.2 for brightness 3", () => {
+  const records = recordsFrom([
+    { s: "on", lu: 1, a: { ...LIGHT_META, brightness: 3, color_mode: "hs", hs_color: [27.5, 63.2] } },
+  ]);
+  const metadata = metadataKeys(records);
+  const { cells, leftovers } = flattenAttributes(records[0].attributes, metadata);
+  assert.deepEqual(cells, {
+    brightness: 3,
+    brightness_percent: 1.2,
+    color_mode: "hs",
+    hue: 27.5,
+    saturation: 63.2,
+  });
+  assert.deepEqual(leftovers, {});
+});
+
+// A colour-mode switch fills color_temp_kelvin first, then hue and saturation
+test("buildColumns: colour-mode switch fills color_temp_kelvin then hue and saturation", () => {
+  const records = recordsFrom([
+    { s: "on", lu: 1, a: { ...LIGHT_META, brightness: 255, color_mode: "color_temp", color_temp_kelvin: 2700, hs_color: null } },
+    { s: "on", lu: 2, a: { ...LIGHT_META, brightness: 128, color_mode: "hs", color_temp_kelvin: null, hs_color: [30, 70] } },
+  ]);
+  const metadata = metadataKeys(records);
+  assert.deepEqual(buildColumns(records, metadata), [
+    "brightness",
+    "brightness_percent",
+    "color_mode",
+    "color_temp_kelvin",
+    "hue",
+    "saturation",
+  ]);
+  assert.deepEqual(flattenAttributes(records[0].attributes, metadata).cells, {
+    brightness: 255,
+    brightness_percent: 100,
+    color_mode: "color_temp",
+    color_temp_kelvin: 2700,
+  });
+  assert.deepEqual(flattenAttributes(records[1].attributes, metadata).cells, {
+    brightness: 128,
+    brightness_percent: 50.2,
+    color_mode: "hs",
+    hue: 30,
+    saturation: 70,
+  });
+});
+
+// An off light (settings all null) leaves every light cell blank
+test("flattenAttributes: an off light row has no cells and no leftovers", () => {
+  const records = recordsFrom([
+    { s: "off", lu: 1, a: { ...LIGHT_META, brightness: null, color_mode: null, color_temp_kelvin: null, hs_color: null, rgb_color: null, xy_color: null } },
+  ]);
+  const { cells, leftovers } = flattenAttributes(records[0].attributes, metadataKeys(records));
+  assert.deepEqual(cells, {});
+  assert.deepEqual(leftovers, {});
+});
+
+// An rgbw light without rgb_color takes red/green/blue/white from rgbw_color, zero kept
+test("flattenAttributes: rgbw without rgb_color gives red, green, blue, white and nothing left over", () => {
+  const records = recordsFrom([
+    { s: "on", lu: 1, a: { ...LIGHT_META, brightness: 255, color_mode: "rgbw", rgbw_color: [165, 136, 0, 88] } },
+  ]);
+  const { cells, leftovers } = flattenAttributes(records[0].attributes, metadataKeys(records));
+  assert.deepEqual(cells, {
+    brightness: 255,
+    brightness_percent: 100,
+    color_mode: "rgbw",
+    red: 165,
+    green: 136,
+    blue: 0,
+    white: 88,
+  });
+  assert.deepEqual(leftovers, {});
+});
+
+// With rgb_color present, rgbw_color keeps its raw values in leftovers but still supplies white
+test("flattenAttributes: rgbw with rgb_color keeps rgbw_color in leftovers", () => {
+  const records = recordsFrom([
+    { s: "on", lu: 1, a: { ...LIGHT_META, color_mode: "rgbw", rgb_color: [255, 200, 100], rgbw_color: [250, 190, 90, 50] } },
+  ]);
+  const { cells, leftovers } = flattenAttributes(records[0].attributes, metadataKeys(records));
+  assert.deepEqual(cells, { color_mode: "rgbw", red: 255, green: 200, blue: 100, white: 50 });
+  assert.deepEqual(leftovers, { rgbw_color: [250, 190, 90, 50] });
+});
+
+// rgbww and xy tuples split into their named columns
+test("flattenAttributes: rgbww and xy tuples split into named columns", () => {
+  const records = recordsFrom([
+    { s: "on", lu: 1, a: { rgbww_color: [10, 20, 30, 40, 50], xy_color: [0.5, 0.25] } },
+  ]);
+  const { cells, leftovers } = flattenAttributes(records[0].attributes, metadataKeys(records));
+  assert.deepEqual(cells, {
+    red: 10,
+    green: 20,
+    blue: 30,
+    cold_white: 40,
+    warm_white: 50,
+    x: 0.5,
+    y: 0.25,
+  });
+  assert.deepEqual(leftovers, {});
+});
+
+// A tuple of the wrong length or with non-numeric members is left in leftovers unchanged
+test("flattenAttributes: malformed tuples go to leftovers without partial cells", () => {
+  const { cells, leftovers } = flattenAttributes(
+    { hs_color: [30], rgb_color: [1, "2", 3], xy_color: [0.1, 0.2, 0.3] },
+    new Set()
+  );
+  assert.deepEqual(cells, {});
+  assert.deepEqual(leftovers, { hs_color: [30], rgb_color: [1, "2", 3], xy_color: [0.1, 0.2, 0.3] });
+});
+
+// A non-numeric brightness is kept as given and gets no derived percent
+test("flattenAttributes: non-numeric brightness has no brightness_percent", () => {
+  const { cells } = flattenAttributes({ brightness: "high" }, new Set());
+  assert.deepEqual(cells, { brightness: "high" });
+});
+
+// Thermostat settings become columns while capability attributes do not
+test("buildColumns: thermostat settings are columns, hvac_modes and min_temp are not", () => {
+  const attrs = {
+    friendly_name: "Hallway",
+    hvac_modes: ["off", "heat"],
+    min_temp: 7,
+    max_temp: 35,
+    target_temp_step: 0.5,
+    supported_features: 17,
+  };
+  const records = recordsFrom([
+    { s: "heat", lu: 1, a: { ...attrs, current_temperature: -3.5, temperature: 21, hvac_action: "heating" } },
+    { s: "heat", lu: 2, a: { ...attrs, current_temperature: -3, temperature: 21, hvac_action: "idle" } },
+  ]);
+  const metadata = metadataKeys(records);
+  assert.deepEqual([...metadata].sort(), [
+    "friendly_name",
+    "hvac_modes",
+    "max_temp",
+    "min_temp",
+    "supported_features",
+    "target_temp_step",
+  ]);
+  assert.deepEqual(buildColumns(records, metadata), ["current_temperature", "hvac_action", "temperature"]);
+  const { cells, leftovers } = flattenAttributes(records[0].attributes, metadata);
+  assert.deepEqual(cells, { current_temperature: -3.5, hvac_action: "heating", temperature: 21 });
+  assert.deepEqual(leftovers, {});
+});
+
+// A metadata-looking attribute that varies gets a column, while a constant sibling stays metadata
+test("metadataKeys: a varying max_value is not metadata but a constant min_value is", () => {
+  const records = recordsFrom([
+    { s: "3", lu: 1, a: { min_value: 0, max_value: 5 } },
+    { s: "4", lu: 2, a: { min_value: 0, max_value: 7 } },
+  ]);
+  const metadata = metadataKeys(records);
+  assert.deepEqual([...metadata], ["min_value"]);
+  assert.deepEqual(buildColumns(records, metadata), ["max_value"]);
+  assert.deepEqual(flattenAttributes(records[1].attributes, metadata).cells, { max_value: 7 });
+});
+
+// A known metadata name that varies (friendly_name renamed) also gets a column
+test("metadataKeys: a renamed friendly_name is not metadata", () => {
+  const records = recordsFrom([
+    { s: "on", lu: 1, a: { friendly_name: "Lamp" } },
+    { s: "on", lu: 2, a: { friendly_name: "Lamp 2" } },
+  ]);
+  const metadata = metadataKeys(records);
+  assert.equal(metadata.size, 0);
+  assert.deepEqual(buildColumns(records, metadata), ["friendly_name"]);
+});
+
+// Records lacking a metadata key are ignored when checking it is constant
+test("metadataKeys: records without the key do not make it vary", () => {
+  const records = recordsFrom([
+    { s: "on", lu: 1, a: { icon: "mdi:lamp" } },
+    { s: "on", lu: 2, a: {} },
+    { s: "on", lu: 3, a: { icon: "mdi:lamp" } },
+  ]);
+  assert.deepEqual([...metadataKeys(records)], ["icon"]);
+});
+
+// A plain sensor carrying only descriptive attributes yields no extra columns
+test("buildColumns: a sensor with only metadata has no attribute columns", () => {
+  const meta = { friendly_name: "Outdoor", unit_of_measurement: "C", device_class: "temperature", state_class: "measurement" };
+  const records = recordsFrom([
+    { s: "-3.5", lu: 1, a: meta },
+    { s: "-3.0", lu: 2, a: meta },
+  ]);
+  const metadata = metadataKeys(records);
+  assert.equal(metadata.size, 4);
+  assert.deepEqual(buildColumns(records, metadata), []);
+});
+
+// Objects go to leftovers, scalar lists become compact JSON, nulls are dropped
+test("flattenAttributes: objects to leftovers, scalar lists to JSON text, nulls omitted", () => {
+  const { cells, leftovers } = flattenAttributes(
+    {
+      effect_list: ["a", "b"],
+      tags: ["a", 2, true],
+      none: [],
+      nothing: null,
+      flag: false,
+      nested: { a: 1 },
+      mixed: [{ a: 1 }],
+      grid: [[1, 2]],
+    },
+    new Set(["effect_list"])
+  );
+  assert.deepEqual(cells, { tags: '["a",2,true]', none: "[]", flag: false });
+  assert.deepEqual(leftovers, { nested: { a: 1 }, mixed: [{ a: 1 }], grid: [[1, 2]] });
+});
+
+// Attributes named like a fixed column are prefixed in both cells and columns
+test("flattenAttributes and buildColumns: fixed-column names get the attribute_ prefix", () => {
+  const records = recordsFrom([
+    { s: "on", lu: 1, a: { value: 1, timestamp: "t", details: "d", changed_by: "me", seconds_since_previous: 9, zeta: 1 } },
+  ]);
+  const metadata = metadataKeys(records);
+  assert.deepEqual(flattenAttributes(records[0].attributes, metadata).cells, {
+    attribute_value: 1,
+    attribute_timestamp: "t",
+    attribute_details: "d",
+    attribute_changed_by: "me",
+    attribute_seconds_since_previous: 9,
+    zeta: 1,
+  });
+  assert.deepEqual(buildColumns(records, metadata), [
+    "attribute_changed_by",
+    "attribute_details",
+    "attribute_seconds_since_previous",
+    "attribute_timestamp",
+    "attribute_value",
+    "zeta",
+  ]);
+});
+
+// Light columns come first in briefing order, then other columns alphabetically
+test("buildColumns: light columns precede the alphabetical rest", () => {
+  const records = recordsFrom([
+    { s: "on", lu: 1, a: { effect: "rainbow", brightness: 10, color_mode: "xy", xy_color: [0.1, 0.2], rgbww_color: [1, 2, 3, 4, 5], rgbw_color: [1, 2, 3, 4], hs_color: [1, 2], color_temp_kelvin: 3000, alpha: 1 } },
+  ]);
+  assert.deepEqual(buildColumns(records, metadataKeys(records)), [
+    "brightness",
+    "brightness_percent",
+    "color_mode",
+    "color_temp_kelvin",
+    "hue",
+    "saturation",
+    "red",
+    "green",
+    "blue",
+    "white",
+    "cold_white",
+    "warm_white",
+    "x",
+    "y",
+    "alpha",
+    "effect",
+  ]);
+});
+
+// A column whose only values are empty strings is not included
+test("buildColumns: an attribute that is always an empty string gets no column", () => {
+  const records = recordsFrom([
+    { s: "on", lu: 1, a: { effect: "" } },
+    { s: "on", lu: 2, a: { effect: "" } },
+  ]);
+  assert.deepEqual(buildColumns(records, metadataKeys(records)), []);
 });

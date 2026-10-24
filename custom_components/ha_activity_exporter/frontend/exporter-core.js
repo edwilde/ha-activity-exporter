@@ -218,6 +218,189 @@ export function filterRepeats(records) {
   return out;
 }
 
+// --- settings columns -----------------------------------------------------
+
+/** Attribute names that describe a device rather than record a setting. */
+const METADATA_NAMES = new Set([
+  "friendly_name",
+  "icon",
+  "entity_picture",
+  "unit_of_measurement",
+  "device_class",
+  "state_class",
+  "attribution",
+  "supported_features",
+  "supported_color_modes",
+  "assumed_state",
+  "editable",
+  "id",
+  "restored",
+  "options",
+  "entity_id",
+  "mode",
+  "step",
+]);
+
+/** Name patterns for descriptive attributes: min_*, max_*, *_list, *_modes, *_step. */
+const METADATA_PATTERN = /^(min_|max_)|(_list|_modes|_step)$/;
+
+/** Columns that always exist in the split CSV layout. */
+const FIXED_COLUMNS = new Set([
+  "timestamp",
+  "value",
+  "seconds_since_previous",
+  "changed_by",
+  "details",
+]);
+
+/** Light columns, in the order they appear before the other attribute columns. */
+const LIGHT_COLUMNS = [
+  "brightness",
+  "brightness_percent",
+  "color_mode",
+  "color_temp_kelvin",
+  "hue",
+  "saturation",
+  "red",
+  "green",
+  "blue",
+  "white",
+  "cold_white",
+  "warm_white",
+  "x",
+  "y",
+];
+
+/**
+ * How each light colour tuple maps onto named columns: the column for each
+ * position, in order (the tuple length is the number of columns).
+ */
+const LIGHT_TUPLES = [
+  ["hs_color", ["hue", "saturation"]],
+  ["rgb_color", ["red", "green", "blue"]],
+  ["rgbw_color", ["red", "green", "blue", "white"]],
+  ["rgbww_color", ["red", "green", "blue", "cold_white", "warm_white"]],
+  ["xy_color", ["x", "y"]],
+];
+
+/**
+ * Report whether an attribute name looks like descriptive metadata.
+ *
+ * @param {string} name
+ * @returns {boolean}
+ */
+function looksLikeMetadata(name) {
+  return METADATA_NAMES.has(name) || METADATA_PATTERN.test(name);
+}
+
+/**
+ * Find the attribute names to treat as metadata: names that look descriptive and
+ * hold the same value in every record that has them.
+ *
+ * @param {{attributes: object}[]} records
+ * @returns {Set<string>}
+ */
+export function metadataKeys(records) {
+  const seen = new Map();
+  const varying = new Set();
+  for (const r of records) {
+    for (const [key, value] of Object.entries(r.attributes || {})) {
+      if (!looksLikeMetadata(key)) continue;
+      const signature = stableStringify(value);
+      if (!seen.has(key)) seen.set(key, signature);
+      else if (seen.get(key) !== signature) varying.add(key);
+    }
+  }
+  return new Set([...seen.keys()].filter((key) => !varying.has(key)));
+}
+
+/**
+ * Report whether a value is a string, number, boolean or null.
+ *
+ * @param {any} value
+ * @returns {boolean}
+ */
+function isScalar(value) {
+  return value === null || ["string", "number", "boolean"].includes(typeof value);
+}
+
+/**
+ * Give a column name the attribute_ prefix when it matches a fixed column.
+ *
+ * @param {string} name
+ * @returns {string}
+ */
+function columnName(name) {
+  return FIXED_COLUMNS.has(name) ? `attribute_${name}` : name;
+}
+
+/**
+ * Split an attributes object into spreadsheet cells and the leftovers that do
+ * not fit in a cell. Metadata keys appear in neither. Light colour tuples become
+ * named columns, brightness gains a percentage, scalar lists become compact JSON
+ * text, and objects, mixed lists and tuples not fully placed stay in leftovers.
+ *
+ * @param {object} attributes
+ * @param {Set<string>} metadata keys from metadataKeys()
+ * @returns {{cells: Record<string, any>, leftovers: Record<string, any>}}
+ */
+export function flattenAttributes(attributes, metadata) {
+  const cells = {};
+  const leftovers = {};
+  const tupleNames = new Map(LIGHT_TUPLES);
+  for (const [key, value] of Object.entries(attributes || {})) {
+    if (metadata.has(key) || value == null || tupleNames.has(key)) continue;
+    if (isScalar(value)) cells[columnName(key)] = value;
+    else if (Array.isArray(value) && value.every(isScalar)) cells[columnName(key)] = JSON.stringify(value);
+    else leftovers[key] = value;
+  }
+  for (const [key, names] of LIGHT_TUPLES) {
+    const value = attributes && attributes[key];
+    if (metadata.has(key) || value == null) continue;
+    const valid =
+      Array.isArray(value) &&
+      value.length === names.length &&
+      value.every((n) => typeof n === "number" && Number.isFinite(n));
+    if (!valid) {
+      leftovers[key] = value;
+      continue;
+    }
+    let placedAll = true;
+    names.forEach((name, i) => {
+      if (name in cells) placedAll = false;
+      else cells[name] = value[i];
+    });
+    if (!placedAll) leftovers[key] = value;
+  }
+  const brightness = cells.brightness;
+  if (typeof brightness === "number" && Number.isFinite(brightness) && !("brightness_percent" in cells)) {
+    cells.brightness_percent = Math.round((brightness / 255) * 1000) / 10;
+  }
+  return { cells, leftovers };
+}
+
+/**
+ * List the attribute columns that hold a value in at least one record: the light
+ * columns first in their fixed order, then the rest alphabetically. Fixed
+ * columns (timestamp, value, ...) are not included.
+ *
+ * @param {{attributes: object}[]} records
+ * @param {Set<string>} metadata keys from metadataKeys()
+ * @returns {string[]}
+ */
+export function buildColumns(records, metadata) {
+  const present = new Set();
+  for (const r of records) {
+    const { cells } = flattenAttributes(r.attributes, metadata);
+    for (const [name, value] of Object.entries(cells)) {
+      if (value !== "") present.add(name);
+    }
+  }
+  const light = LIGHT_COLUMNS.filter((name) => present.has(name));
+  const rest = [...present].filter((name) => !LIGHT_COLUMNS.includes(name)).sort();
+  return [...light, ...rest];
+}
+
 // --- formatting -----------------------------------------------------------
 
 /**
