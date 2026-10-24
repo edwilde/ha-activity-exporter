@@ -16,6 +16,7 @@ import {
   normaliseRecords,
   parseHistoryRecords,
   sanitizeFilename,
+  secondsSincePrevious,
   toCsv,
   toJson,
   wallClockToEpochMs,
@@ -350,38 +351,43 @@ test("buildFilename: entity + date range + extension", () => {
 
 // --- toCsv ----------------------------------------------------------------
 
-test("toCsv: plain-language header, CRLF rows, RFC-4180 escaping of details", () => {
+// Checks the legacy three-column layout, CRLF rows and RFC-4180 escaping of details.
+test("toCsv: legacy layout has a plain-language header, CRLF rows and escaped details", () => {
   const records = [
     { timestampMs: Date.UTC(2026, 0, 15, 0, 0, 0), state: "on", attributes: { friendly_name: "Front, Door" } },
   ];
-  const csv = toCsv(records, "UTC");
+  const csv = toCsv(records, "UTC", { splitColumns: false });
   const lines = csv.split("\r\n");
   assert.equal(lines[0], "timestamp,value,details");
   assert.ok(lines[1].startsWith("2026-01-15T00:00:00+00:00,on,"));
   assert.ok(lines[1].includes('"{""friendly_name"":""Front, Door""}"'));
 });
 
-test("toCsv: escapes commas/quotes/newlines in the value", () => {
+// Checks commas, quotes and newlines in the value are quoted in the legacy layout.
+test("toCsv: legacy layout escapes commas, quotes and newlines in the value", () => {
   const records = [
     { timestampMs: Date.UTC(2026, 0, 15, 0, 0, 0), state: 'a"b,c\nd', attributes: {} },
   ];
-  const csv = toCsv(records, "UTC");
+  const csv = toCsv(records, "UTC", { splitColumns: false });
   const row = csv.split("\r\n")[1];
   assert.ok(row.includes('"a""b,c\nd"'));
 });
 
-test("toCsv: neutralises spreadsheet formula injection", () => {
+// Checks formula-leading text is prefixed in the legacy layout while numbers are left alone.
+test("toCsv: legacy layout neutralises spreadsheet formula injection but keeps numbers", () => {
   const mk = (state) => ({ timestampMs: Date.UTC(2026, 0, 15, 0, 0, 0), state, attributes: {} });
-  const rows = toCsv([mk("=SUM(1+1)"), mk("+1"), mk("-5"), mk("@x"), mk("on")], "UTC").split("\r\n");
+  const rows = toCsv([mk("=SUM(1+1)"), mk("+1"), mk("-x"), mk("@x"), mk("on"), mk("-5")], "UTC", { splitColumns: false }).split("\r\n");
   assert.equal(rows[1], "2026-01-15T00:00:00+00:00,'=SUM(1+1),{}");
   assert.equal(rows[2], "2026-01-15T00:00:00+00:00,'+1,{}");
-  assert.equal(rows[3], "2026-01-15T00:00:00+00:00,'-5,{}");
+  assert.equal(rows[3], "2026-01-15T00:00:00+00:00,'-x,{}");
   assert.equal(rows[4], "2026-01-15T00:00:00+00:00,'@x,{}");
   assert.equal(rows[5], "2026-01-15T00:00:00+00:00,on,{}"); // benign value untouched
+  assert.equal(rows[6], "2026-01-15T00:00:00+00:00,-5,{}"); // a negative number stays numeric
 });
 
-test("toCsv: empty records yields the header line only", () => {
-  assert.equal(toCsv([], "UTC"), "timestamp,value,details");
+// Checks empty input gives only the legacy header.
+test("toCsv: legacy layout with empty records yields the header line only", () => {
+  assert.equal(toCsv([], "UTC", { splitColumns: false }), "timestamp,value,details");
 });
 
 // --- toJson / buildJsonPayload --------------------------------------------
@@ -413,7 +419,9 @@ test("buildJsonPayload: self-describing wrapper shape (machine schema keeps HA n
     timestamp: "2026-01-15T01:00:00+00:00",
     state: "on",
     attributes: { device_class: "door" },
+    derived: { state_changed: true, seconds_since_previous: null },
   });
+  assert.deepEqual(payload.records[1].derived, { state_changed: true, seconds_since_previous: 3600 });
 });
 
 test("toJson: produces valid, pretty-printed JSON", () => {
@@ -720,4 +728,179 @@ test("buildColumns: an attribute that is always an empty string gets no column",
     { s: "on", lu: 2, a: { effect: "" } },
   ]);
   assert.deepEqual(buildColumns(records, metadataKeys(records)), []);
+});
+
+// --- split CSV ------------------------------------------------------------
+
+const BASE = 1768435200; // 2026-01-15T00:00:00Z
+
+/** Bedside light rows: a value change then two settings-only steps. */
+function bedsideRecords() {
+  return recordsFrom([
+    { s: "on", lu: BASE, a: { ...LIGHT_META, brightness: 3, color_mode: "hs", hs_color: [27.5, 63.2], rgb_color: [255, 150, 100], xy_color: [0.5, 0.4] } },
+    { s: "on", lu: BASE + 30, lc: BASE, a: { ...LIGHT_META, brightness: 20, color_mode: "hs", hs_color: [28, 63.2], rgb_color: [255, 152, 100], xy_color: [0.5, 0.4] } },
+    { s: "on", lu: BASE + 60.25, lc: BASE, a: { ...LIGHT_META, brightness: 255, color_mode: "hs", hs_color: [30, 70], rgb_color: [255, 170, 76], xy_color: [0.45, 0.41] } },
+  ]);
+}
+
+// Checks the secondsSincePrevious helper returns null first, then a 3 decimal place gap.
+test("secondsSincePrevious: null for the first record and the gap rounded to 3 decimals after", () => {
+  const records = [{ timestampMs: 0 }, { timestampMs: 1234.5678 }, { timestampMs: 31234.5678 }];
+  assert.equal(secondsSincePrevious(records, 0), null);
+  assert.equal(secondsSincePrevious(records, 1), 1.235);
+  assert.equal(secondsSincePrevious(records, 2), 30);
+});
+
+// Checks the bedside light gives the exact split header and rows, settings-only steps included.
+test("toCsv: split layout writes the bedside light's settings in named columns", () => {
+  const rows = toCsv(bedsideRecords(), "UTC").split("\r\n");
+  assert.equal(
+    rows[0],
+    "timestamp,value,seconds_since_previous,brightness,brightness_percent,color_mode,hue,saturation,red,green,blue,x,y,details"
+  );
+  assert.equal(rows[1], "2026-01-15T00:00:00+00:00,on,,3,1.2,hs,27.5,63.2,255,150,100,0.5,0.4,");
+  assert.equal(rows[2], "2026-01-15T00:00:30+00:00,on,30,20,7.8,hs,28,63.2,255,152,100,0.5,0.4,");
+  assert.equal(rows[3], "2026-01-15T00:01:00+00:00,on,30.25,255,100,hs,30,70,255,170,76,0.45,0.41,");
+  assert.equal(rows.length, 4);
+});
+
+// Checks split is the default and an explicit true gives the same output.
+test("toCsv: split layout is the default", () => {
+  const records = bedsideRecords();
+  assert.equal(toCsv(records, "UTC"), toCsv(records, "UTC", { splitColumns: true }));
+  assert.notEqual(toCsv(records, "UTC"), toCsv(records, "UTC", { splitColumns: false }));
+});
+
+// Checks details holds the compact JSON of leftovers and is blank when there are none.
+test("toCsv: split layout puts leftovers in details and leaves it blank otherwise", () => {
+  const records = recordsFrom([
+    { s: "on", lu: BASE, a: { color_mode: "rgbw", rgb_color: [255, 200, 100], rgbw_color: [250, 190, 90, 50] } },
+    { s: "off", lu: BASE + 5, a: {} },
+  ]);
+  const rows = toCsv(records, "UTC").split("\r\n");
+  assert.equal(rows[0], "timestamp,value,seconds_since_previous,color_mode,red,green,blue,white,details");
+  assert.equal(rows[1], '2026-01-15T00:00:00+00:00,on,,rgbw,255,200,100,50,"{""rgbw_color"":[250,190,90,50]}"');
+  assert.equal(rows[2], "2026-01-15T00:00:05+00:00,off,5,,,,,,");
+});
+
+// Checks negative numbers in a column and in the value stay numeric.
+test("toCsv: split layout keeps -3.5 numeric in a column and as the value", () => {
+  const thermostat = recordsFrom([
+    { s: "heat", lu: BASE, a: { friendly_name: "Hall", hvac_modes: ["off", "heat"], current_temperature: -3.5, temperature: 21, hvac_action: "heating" } },
+  ]);
+  assert.deepEqual(toCsv(thermostat, "UTC").split("\r\n"), [
+    "timestamp,value,seconds_since_previous,current_temperature,hvac_action,temperature,details",
+    "2026-01-15T00:00:00+00:00,heat,,-3.5,heating,21,",
+  ]);
+  const sensor = recordsFrom([
+    { s: "-3.5", lu: BASE, a: { unit_of_measurement: "C" } },
+    { s: "-3.0", lu: BASE + 60, a: { unit_of_measurement: "C" } },
+  ]);
+  assert.deepEqual(toCsv(sensor, "UTC").split("\r\n"), [
+    "timestamp,value,seconds_since_previous,details",
+    "2026-01-15T00:00:00+00:00,-3.5,,",
+    "2026-01-15T00:01:00+00:00,-3.0,60,",
+  ]);
+});
+
+// Checks formula-leading text in the value and in a column is still prefixed.
+test("toCsv: split layout still neutralises =cmd and other formula text", () => {
+  const records = recordsFrom([
+    { s: "=cmd", lu: BASE, a: { effect: "=cmd", note: "-abc", other: "+1", num: "-5abc", neg: "-1.5e-3" } },
+  ]);
+  const rows = toCsv(records, "UTC").split("\r\n");
+  assert.equal(rows[0], "timestamp,value,seconds_since_previous,effect,neg,note,num,other,details");
+  assert.equal(rows[1], "2026-01-15T00:00:00+00:00,'=cmd,,'=cmd,-1.5e-3,'-abc,'-5abc,'+1,");
+});
+
+// Checks empty input gives the split header with no attribute columns.
+test("toCsv: split layout with empty records yields the header line only", () => {
+  assert.equal(toCsv([], "UTC"), "timestamp,value,seconds_since_previous,details");
+});
+
+// --- JSON entity and derived ----------------------------------------------
+
+const JSON_META = {
+  entityId: "light.bedside",
+  friendlyName: "Bedside",
+  exportedAtMs: (BASE + 3600) * 1000,
+  periodStartMs: BASE * 1000,
+  periodEndMs: (BASE + 3600) * 1000,
+  stateChangesOnly: false,
+};
+
+// Checks the entity block carries id, name, domain and capabilities.
+test("buildJsonPayload: entity block has entity_id, friendly_name, domain and capabilities", () => {
+  const payload = buildJsonPayload(JSON_META, bedsideRecords(), "UTC");
+  assert.deepEqual(payload.entity, {
+    entity_id: "light.bedside",
+    friendly_name: "Bedside",
+    domain: "light",
+    capabilities: {
+      friendly_name: "Bedside",
+      supported_color_modes: ["color_temp", "hs", "xy"],
+      supported_features: 40,
+      min_color_temp_kelvin: 2000,
+      max_color_temp_kelvin: 6535,
+      min_mireds: 153,
+      max_mireds: 500,
+    },
+  });
+  assert.equal(payload.entity_id, "light.bedside");
+});
+
+// Checks capabilities take each key from the latest record that has it.
+test("buildJsonPayload: capabilities come from the latest record that has each key", () => {
+  const records = recordsFrom([
+    { s: "on", lu: BASE, a: { icon: "mdi:lamp", supported_color_modes: ["hs"] } },
+    { s: "off", lu: BASE + 10, a: { supported_color_modes: ["hs"] } },
+  ]);
+  const payload = buildJsonPayload(JSON_META, records, "UTC");
+  assert.deepEqual(payload.entity.capabilities, { icon: "mdi:lamp", supported_color_modes: ["hs"] });
+});
+
+// Checks a null friendly name, no dot in the id and no records.
+test("buildJsonPayload: entity block handles a missing name, a dotless id and no records", () => {
+  const payload = buildJsonPayload({ ...JSON_META, entityId: "plain", friendlyName: undefined }, [], "UTC");
+  assert.deepEqual(payload.entity, { entity_id: "plain", friendly_name: null, domain: "plain", capabilities: {} });
+  assert.equal(buildJsonPayload({ ...JSON_META, entityId: "a.b.c" }, [], "UTC").entity.domain, "a");
+});
+
+// Checks a settings-only row reads state_changed false and carries derived values.
+test("buildJsonPayload: settings-only rows have state_changed false and exact derived values", () => {
+  const payload = buildJsonPayload(JSON_META, bedsideRecords(), "UTC");
+  assert.deepEqual(payload.records.map((r) => r.derived), [
+    { state_changed: true, seconds_since_previous: null, brightness_percent: 1.2 },
+    { state_changed: false, seconds_since_previous: 30, brightness_percent: 7.8 },
+    { state_changed: false, seconds_since_previous: 30.25, brightness_percent: 100 },
+  ]);
+  assert.deepEqual(payload.records[1].attributes, bedsideRecords()[1].attributes);
+});
+
+// Checks brightness_percent is left out unless brightness is a finite number.
+test("buildJsonPayload: brightness_percent is only present for a numeric brightness", () => {
+  const records = recordsFrom([
+    { s: "off", lu: BASE, a: { brightness: null } },
+    { s: "on", lu: BASE + 1, a: { brightness: "high" } },
+    { s: "on", lu: BASE + 2, a: { brightness: 0 } },
+    { s: "on", lu: BASE + 3, a: {} },
+  ]);
+  const derived = buildJsonPayload(JSON_META, records, "UTC").records.map((r) => r.derived);
+  assert.deepEqual(derived[0], { state_changed: true, seconds_since_previous: null });
+  assert.deepEqual(derived[1], { state_changed: true, seconds_since_previous: 1 });
+  assert.deepEqual(derived[2], { state_changed: true, seconds_since_previous: 1, brightness_percent: 0 });
+  assert.deepEqual(derived[3], { state_changed: true, seconds_since_previous: 1 });
+});
+
+// Checks a record without lastChangedMs counts as a value change.
+test("buildJsonPayload: a record without lastChangedMs counts as state_changed true", () => {
+  const records = [{ timestampMs: 5000, state: "on", attributes: {} }];
+  assert.equal(buildJsonPayload(JSON_META, records, "UTC").records[0].derived.state_changed, true);
+});
+
+// Checks toJson passes the new blocks through.
+test("toJson: includes the entity block and derived values", () => {
+  const parsed = JSON.parse(toJson(JSON_META, bedsideRecords(), "UTC"));
+  assert.equal(parsed.entity.domain, "light");
+  assert.equal(parsed.records[1].derived.state_changed, false);
 });

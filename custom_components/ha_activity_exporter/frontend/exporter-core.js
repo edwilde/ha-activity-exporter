@@ -335,6 +335,17 @@ function columnName(name) {
 }
 
 /**
+ * Convert a brightness (0-255) to a percentage with one decimal place.
+ *
+ * @param {any} brightness
+ * @returns {number|null} null unless brightness is a finite number
+ */
+function brightnessPercent(brightness) {
+  if (typeof brightness !== "number" || !Number.isFinite(brightness)) return null;
+  return Math.round((brightness / 255) * 1000) / 10;
+}
+
+/**
  * Split an attributes object into spreadsheet cells and the leftovers that do
  * not fit in a cell. Metadata keys appear in neither. Light colour tuples become
  * named columns, brightness gains a percentage, scalar lists become compact JSON
@@ -372,10 +383,8 @@ export function flattenAttributes(attributes, metadata) {
     });
     if (!placedAll) leftovers[key] = value;
   }
-  const brightness = cells.brightness;
-  if (typeof brightness === "number" && Number.isFinite(brightness) && !("brightness_percent" in cells)) {
-    cells.brightness_percent = Math.round((brightness / 255) * 1000) / 10;
-  }
+  const percent = brightnessPercent(cells.brightness);
+  if (percent !== null && !("brightness_percent" in cells)) cells.brightness_percent = percent;
   return { cells, leftovers };
 }
 
@@ -443,34 +452,128 @@ export function buildFilename(entityId, startMs, endMs, ext, timeZone) {
   return `${base}.${ext}`;
 }
 
+/** Matches text that is a plain number, so a spreadsheet keeps it numeric. */
+const NUMERIC_TEXT = /^-?\d+(\.\d+)?(e[+-]?\d+)?$/i;
+
 /**
  * Escape a single CSV field per RFC-4180, and neutralise spreadsheet formula
- * injection: a field whose first character is one of = + - @ (tab/CR) is
- * prefixed with a single quote so Excel/Sheets treat it as text, not a formula.
+ * injection: a non-numeric field whose first character is one of = + - @ (tab/CR)
+ * is prefixed with a single quote so Excel/Sheets treat it as text, not a
+ * formula. Numbers (including negative ones) are left unprefixed.
  */
 function csvEscape(value) {
   let s = value == null ? "" : String(value);
-  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+  const isNumber = typeof value === "number" ? Number.isFinite(value) : NUMERIC_TEXT.test(s);
+  if (!isNumber && /^[=+\-@\t\r]/.test(s)) s = `'${s}`;
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
 /**
- * Build CSV text (CRLF line endings, RFC-4180 quoting).
- * Plain-language columns: timestamp, value, details (details is a compact JSON
- * string of the extra information recorded alongside the value).
+ * Give the seconds between a record and the one before it, rounded to three
+ * decimal places.
+ *
+ * @param {{timestampMs: number}[]} records oldest-first
+ * @param {number} index position of the record to measure
+ * @returns {number|null} null for the first record
  */
-export function toCsv(records, timeZone) {
-  const lines = ["timestamp,value,details"];
-  for (const r of records) {
+export function secondsSincePrevious(records, index) {
+  if (index === 0) return null;
+  return Math.round(records[index].timestampMs - records[index - 1].timestampMs) / 1000;
+}
+
+/**
+ * Build CSV text (CRLF line endings, RFC-4180 quoting).
+ * By default each setting recorded alongside the value gets its own column:
+ * timestamp, value, seconds_since_previous, the setting columns, then details
+ * (a compact JSON string of whatever does not fit in a column). With
+ * splitColumns false the output is the three columns timestamp, value, details,
+ * where details holds all the recorded information.
+ *
+ * @param {{timestampMs:number, state:string, attributes:object}[]} records oldest-first
+ * @param {string} [timeZone]
+ * @param {{splitColumns?: boolean}} [options]
+ */
+export function toCsv(records, timeZone, { splitColumns = true } = {}) {
+  if (!splitColumns) {
+    const lines = ["timestamp,value,details"];
+    for (const r of records) {
+      lines.push(
+        [
+          csvEscape(formatTimestamp(r.timestampMs, timeZone)),
+          csvEscape(r.state),
+          csvEscape(JSON.stringify(r.attributes || {})),
+        ].join(",")
+      );
+    }
+    return lines.join("\r\n");
+  }
+  const metadata = metadataKeys(records);
+  const columns = buildColumns(records, metadata);
+  const lines = [["timestamp", "value", "seconds_since_previous", ...columns, "details"].join(",")];
+  records.forEach((r, index) => {
+    const { cells, leftovers } = flattenAttributes(r.attributes, metadata);
+    const details = Object.keys(leftovers).length ? JSON.stringify(leftovers) : "";
     lines.push(
       [
-        csvEscape(formatTimestamp(r.timestampMs, timeZone)),
-        csvEscape(r.state),
-        csvEscape(JSON.stringify(r.attributes || {})),
-      ].join(",")
+        formatTimestamp(r.timestampMs, timeZone),
+        r.state,
+        secondsSincePrevious(records, index),
+        ...columns.map((name) => cells[name]),
+        details,
+      ]
+        .map(csvEscape)
+        .join(",")
     );
-  }
+  });
   return lines.join("\r\n");
+}
+
+/**
+ * Give the part of an entity id before its first dot.
+ *
+ * @param {string} entityId
+ * @returns {string}
+ */
+function entityDomain(entityId) {
+  const dot = String(entityId).indexOf(".");
+  return dot === -1 ? String(entityId) : String(entityId).slice(0, dot);
+}
+
+/**
+ * Collect each metadata attribute with its value from the most recent record
+ * that has it.
+ *
+ * @param {{attributes: object}[]} records oldest-first
+ * @returns {Record<string, any>}
+ */
+function latestCapabilities(records) {
+  const metadata = metadataKeys(records);
+  const capabilities = {};
+  for (const r of records) {
+    for (const key of Object.keys(r.attributes || {})) {
+      if (metadata.has(key)) capabilities[key] = r.attributes[key];
+    }
+  }
+  return capabilities;
+}
+
+/**
+ * Compute the values derived for one record: whether its value changed, the
+ * gap since the previous record, and brightness as a percentage when known.
+ *
+ * @param {{timestampMs:number, lastChangedMs?:number, attributes:object}[]} records oldest-first
+ * @param {number} index position of the record
+ * @returns {{state_changed: boolean, seconds_since_previous: number|null, brightness_percent?: number}}
+ */
+function deriveValues(records, index) {
+  const r = records[index];
+  const derived = {
+    state_changed: r.lastChangedMs == null || r.lastChangedMs === r.timestampMs,
+    seconds_since_previous: secondsSincePrevious(records, index),
+  };
+  const percent = brightnessPercent((r.attributes || {}).brightness);
+  if (percent !== null) derived.brightness_percent = percent;
+  return derived;
 }
 
 /**
@@ -480,13 +583,20 @@ export function toCsv(records, timeZone) {
  *
  * @param {{entityId:string, friendlyName?:string, exportedAtMs:number,
  *          periodStartMs:number, periodEndMs:number, stateChangesOnly:boolean}} meta
- * @param {{timestampMs:number, state:string, attributes:object}[]} records
+ * @param {{timestampMs:number, lastChangedMs?:number, state:string, attributes:object}[]} records oldest-first
  * @param {string} [timeZone]
  */
 export function buildJsonPayload(meta, records, timeZone) {
+  const friendlyName = meta.friendlyName ?? null;
   return {
     entity_id: meta.entityId,
-    friendly_name: meta.friendlyName ?? null,
+    friendly_name: friendlyName,
+    entity: {
+      entity_id: meta.entityId,
+      friendly_name: friendlyName,
+      domain: entityDomain(meta.entityId),
+      capabilities: latestCapabilities(records),
+    },
     exported_at: formatTimestamp(meta.exportedAtMs, timeZone),
     period: {
       start: formatTimestamp(meta.periodStartMs, timeZone),
@@ -494,10 +604,11 @@ export function buildJsonPayload(meta, records, timeZone) {
     },
     state_changes_only: !!meta.stateChangesOnly,
     record_count: records.length,
-    records: records.map((r) => ({
+    records: records.map((r, index) => ({
       timestamp: formatTimestamp(r.timestampMs, timeZone),
       state: r.state,
       attributes: r.attributes || {},
+      derived: deriveValues(records, index),
     })),
   };
 }
