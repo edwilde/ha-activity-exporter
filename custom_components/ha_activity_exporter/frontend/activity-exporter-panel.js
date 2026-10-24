@@ -63,6 +63,7 @@ const STYLES = `
     font-size: 1.02rem;
     padding: 0;
   }
+  legend.title { margin-bottom: 2px; }
   .help { color: var(--secondary-text-color); font-size: 0.85rem; margin: 4px 0 10px; line-height: 1.4; }
   ha-entity-picker, .entity-fallback input { width: 100%; box-sizing: border-box; }
   .entity-fallback input {
