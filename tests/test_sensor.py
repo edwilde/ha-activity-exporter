@@ -252,6 +252,22 @@ async def test_changing_the_chosen_details_updates_the_mirror_in_place(
     assert entry.runtime_data[LAMP].chosen == ["color_mode"]
 
 
+async def test_choosing_an_oversize_detail_reports_it_as_dropped(
+    hass: HomeAssistant,
+) -> None:
+    """Adding a detail that cannot fit leaves the saved values alone but lists it as dropped."""
+    _set_lamp(hass, brightness=1, options=["x" * 20000])
+    entry = await _setup(hass, {LAMP: ["brightness"]})
+    assert entry.runtime_data[LAMP].dropped == []
+
+    hass.config_entries.async_update_entry(
+        entry, options={CONF_TRACKED: {LAMP: ["brightness", "options"]}}
+    )
+    await hass.async_block_till_done()
+
+    assert entry.runtime_data[LAMP].dropped == ["options"]
+
+
 async def test_unloading_the_entry_removes_the_mirrors(hass: HomeAssistant) -> None:
     """Unloading the entry takes its mirror sensors offline."""
     _set_lamp(hass, brightness=1)
