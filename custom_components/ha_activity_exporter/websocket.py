@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from homeassistant.components import websocket_api
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
@@ -42,15 +42,17 @@ def ws_detail_list(
     connection: websocket_api.ActiveConnection,
     msg: dict[str, Any],
 ) -> None:
-    """Send each tracked source with its mirror, chosen details and dropped details."""
-    entry = _loaded_entry(hass)
-    if entry is None:
+    """Send each tracked source with its mirror, chosen details and dropped details, loaded or not."""
+    entries = hass.config_entries.async_entries(DOMAIN)
+    if not entries:
         connection.send_result(msg["id"], [])
         return
+    entry = entries[0]
+    mirrors = entry.runtime_data if entry.state is ConfigEntryState.LOADED else {}
     registry = er.async_get(hass)
     rows = []
     for source, chosen in entry.options.get(CONF_TRACKED, {}).items():
-        mirror = entry.runtime_data.get(source)
+        mirror = mirrors.get(source)
         rows.append(
             {
                 "source_entity_id": source,

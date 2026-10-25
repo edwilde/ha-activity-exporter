@@ -868,7 +868,10 @@ class ActivityExporterPanel extends HTMLElement {
     this._els.tabDetail.setAttribute("aria-selected", String(detail));
     this._els.panelExport.hidden = detail;
     this._els.panelDetail.hidden = !detail;
-    if (detail) this._renderDetailList();
+    if (detail) {
+      this._renderDetailList();
+      this._refreshDetailList();
+    }
   }
 
   /**
@@ -903,14 +906,6 @@ class ActivityExporterPanel extends HTMLElement {
     this._renderDetailList();
     this._updateDetailHint();
     return true;
-  }
-
-  /**
-   * Reload the saved list after a save, trying once more shortly after if the integration is still restarting.
-   */
-  async _refreshDetailListAfterSave() {
-    if (await this._refreshDetailList()) return;
-    setTimeout(() => this._refreshDetailList(), 1500);
   }
 
   /**
@@ -1097,7 +1092,7 @@ class ActivityExporterPanel extends HTMLElement {
       return;
     }
     if (this._detailTarget === id) this._closeDetailEditor();
-    await this._refreshDetailListAfterSave();
+    await this._refreshDetailList();
     this._showDetailStatus("success", `No longer saving extra detail for ${name}.`);
     this._els.detailTitle.focus();
   }
@@ -1248,7 +1243,7 @@ class ActivityExporterPanel extends HTMLElement {
       return;
     }
     this._closeDetailEditor();
-    await this._refreshDetailListAfterSave();
+    await this._refreshDetailList();
     this._showDetailStatus("success", "Saving from now on. Earlier history doesn't have these details.");
     this._els.detailTitle.focus();
   }

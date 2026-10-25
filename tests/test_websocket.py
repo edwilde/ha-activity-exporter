@@ -53,7 +53,8 @@ async def test_list_returns_the_tracked_mirror(
     hass: HomeAssistant, hass_ws_client: ClientSessionGenerator
 ) -> None:
     """List reports each tracked source with its mirror, details and drops."""
-    await _setup(hass)
+    entry = await _setup(hass)
+    entry.runtime_data[LAMP].dropped = ["color_mode"]
     client = await hass_ws_client(hass)
 
     response = await _call(client, WS_DETAIL_LIST)
@@ -64,7 +65,7 @@ async def test_list_returns_the_tracked_mirror(
             "source_entity_id": LAMP,
             "mirror_entity_id": MIRROR,
             "attributes": ["brightness"],
-            "dropped": [],
+            "dropped": ["color_mode"],
         }
     ]
 
@@ -90,12 +91,33 @@ async def test_list_falls_back_to_the_registry_without_a_runtime_mirror(
     assert missing["result"] == [{**expected, "mirror_entity_id": None}]
 
 
-async def test_list_is_empty_without_a_loaded_entry(
+async def test_list_reads_the_tracked_options_while_the_entry_is_not_loaded(
     hass: HomeAssistant, hass_ws_client: ClientSessionGenerator
 ) -> None:
-    """With no loaded entry, list returns an empty list."""
+    """An unloaded entry still lists its tracked sources, from the registry, with no drops."""
     entry = await _setup(hass)
     assert await hass.config_entries.async_unload(entry.entry_id)
+    client = await hass_ws_client(hass)
+
+    response = await _call(client, WS_DETAIL_LIST)
+
+    assert response["success"]
+    assert response["result"] == [
+        {
+            "source_entity_id": LAMP,
+            "mirror_entity_id": MIRROR,
+            "attributes": ["brightness"],
+            "dropped": [],
+        }
+    ]
+
+
+async def test_list_is_empty_without_a_config_entry(
+    hass: HomeAssistant, hass_ws_client: ClientSessionGenerator
+) -> None:
+    """With no config entry at all, list returns an empty list."""
+    entry = await _setup(hass)
+    assert await hass.config_entries.async_remove(entry.entry_id)
     client = await hass_ws_client(hass)
 
     response = await _call(client, WS_DETAIL_LIST)
