@@ -16,11 +16,15 @@ from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.ha_activity_exporter.const import (
+    CONF_TRACKED,
     DOMAIN,
     PANEL_JS_URL,
     PANEL_URL_PATH,
     PANEL_WEBCOMPONENT_NAME,
 )
+
+LAMP = "light.lamp"
+MIRROR = "sensor.activity_exporter_light_lamp"
 
 
 def _errors(caplog: pytest.LogCaptureFixture) -> list[str]:
@@ -34,10 +38,12 @@ async def _http_ready(hass: HomeAssistant) -> None:
     await hass.async_block_till_done()
 
 
-async def _setup_entry(hass: HomeAssistant) -> MockConfigEntry:
+async def _setup_entry(
+    hass: HomeAssistant, options: dict | None = None
+) -> MockConfigEntry:
     """Add the config entry and set it up through Home Assistant."""
     await _http_ready(hass)
-    entry = MockConfigEntry(domain=DOMAIN)
+    entry = MockConfigEntry(domain=DOMAIN, options=options or {})
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
@@ -60,8 +66,9 @@ async def test_setup_registers_panel_and_unload_removes_it(
 async def test_reload_keeps_single_panel(
     hass: HomeAssistant, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Reloading a loaded entry re-registers the panel and logs no error."""
-    entry = await _setup_entry(hass)
+    """Reloading a loaded entry re-registers the panel and mirrors without an error."""
+    hass.states.async_set(LAMP, "on", {"brightness": 120})
+    entry = await _setup_entry(hass, {CONF_TRACKED: {LAMP: ["brightness"]}})
     caplog.clear()
 
     assert await hass.config_entries.async_reload(entry.entry_id)
@@ -69,6 +76,7 @@ async def test_reload_keeps_single_panel(
 
     assert entry.state is ConfigEntryState.LOADED
     assert PANEL_URL_PATH in hass.data.get(DATA_PANELS, {})
+    assert hass.states.get(MIRROR).attributes["brightness"] == 120
     assert _errors(caplog) == []
 
 
