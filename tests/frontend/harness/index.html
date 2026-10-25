@@ -153,6 +153,7 @@
           this.dispatchEvent(new CustomEvent("value-changed", { detail: { value: this._value }, bubbles: true, composed: true }));
         });
       }
+      focus() {}
       set hass(hass) { this._hass = hass; this._render(); }
       get hass() { return this._hass; }
       set value(v) { this._value = v || ""; this._render(); }

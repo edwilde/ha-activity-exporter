@@ -265,7 +265,7 @@ class ActivityExporterPanel extends HTMLElement {
         <p class="intro">Export the history of any device or sensor to a file you can open in a spreadsheet or hand to an AI for analysis.</p>
 
         <div class="field" id="entity-field">
-          <label class="title" for="entity-add">What do you want to export?</label>
+          <label class="title" id="entity-title" for="entity-add" tabindex="-1">What do you want to export?</label>
           <p class="help" id="entity-help" aria-live="polite">${ENTITY_HELP}</p>
           <ul class="chosen-list" id="chosen-list" aria-label="Chosen devices and sensors" hidden></ul>
           <div id="entity-control"></div>
@@ -329,6 +329,7 @@ class ActivityExporterPanel extends HTMLElement {
 
     this._els = {
       entityControl: root.getElementById("entity-control"),
+      entityTitle: root.getElementById("entity-title"),
       entityHelp: root.getElementById("entity-help"),
       chosenList: root.getElementById("chosen-list"),
       presets: root.querySelector(".presets"),
@@ -585,7 +586,18 @@ class ActivityExporterPanel extends HTMLElement {
     }
     this._syncSelectionControls();
     this._updateButtons();
-    if (!this._focusRemoveButton(index)) this._addControl()?.focus?.();
+    if (!this._focusRemoveButton(index)) this._focusAddControl();
+  }
+
+  /**
+   * Focus the add control, or the field title when the control cannot take focus.
+   */
+  _focusAddControl() {
+    const add = this._addControl();
+    add?.focus?.();
+    const active = this.shadowRoot.activeElement;
+    if (add && active && (active === add || add.contains(active))) return;
+    this._els.entityTitle.focus();
   }
 
   /**
