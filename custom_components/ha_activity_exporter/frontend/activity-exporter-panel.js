@@ -301,7 +301,7 @@ class ActivityExporterPanel extends HTMLElement {
             <input type="checkbox" id="split-columns" checked />
             <span class="toggle-text">
               <span class="label">Give each setting its own column</span>
-              <span class="help toggle-help">Puts things like brightness, colour and temperature in separate spreadsheet columns. Turn off for a simple three-column file.</span>
+              <span class="help toggle-help">Puts things like brightness, colour and temperature in separate spreadsheet columns. Turn off for a simpler file with fewer columns.</span>
             </span>
           </label>
         </div>
@@ -606,7 +606,8 @@ class ActivityExporterPanel extends HTMLElement {
     const full = ids.length >= MAX_ENTITIES;
     this._els.chosenList.hidden = ids.length === 0;
     this._els.entityControl.hidden = full;
-    this._els.entityHelp.textContent = full ? ENTITY_HELP_FULL : ENTITY_HELP;
+    const helpText = full ? ENTITY_HELP_FULL : ENTITY_HELP;
+    if (this._els.entityHelp.textContent !== helpText) this._els.entityHelp.textContent = helpText;
 
     if (this._controlMode === "picker") {
       const add = this._addControl();
