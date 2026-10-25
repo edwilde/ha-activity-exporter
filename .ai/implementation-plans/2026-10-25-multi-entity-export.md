@@ -322,4 +322,8 @@ None.
 
 ### Deferred/Skipped Items
 - Finding 4 (raw id in the no-history message) skipped.
-- Code review notes left as is: same-named devices get identical Remove labels in picker mode; a picker registering late rebuilds the fallback input mid-typing (as in 1.1.x); the field title's `<label for>` only associates with the fallback input.
+- Code review notes left as is: a picker registering late rebuilds the fallback input mid-typing (as in 1.1.x); the field title's `<label for>` only associates with the fallback input.
+
+### After release (1.2.1)
+
+The Remove button now appears only in the fallback, where a chosen device is a plain name with no other way off the list. With `ha-entity-picker`, each row's own clear X removes it (`_changeChosen`), so the button duplicated it. Reaching 20 devices with no Remove button falls back to `_focusAddControl`, which lands on the field title because the add control is hidden.

@@ -46,7 +46,7 @@ Home Assistant recorded (optionally minus the repeats).
 ## Using it
 
 1. Open **Activity Exporter** from the sidebar.
-2. **What do you want to export?** Start typing the name of a device or sensor and pick it. To export several at once, add another; each chosen device is listed with a Remove button.
+2. **What do you want to export?** Start typing the name of a device or sensor and pick it. To export several at once, add another. To take one off the list, clear it with its X, or press Remove if you see a plain text box instead of a dropdown.
 3. **Time period** — tap a quick button, or choose your own start and end dates.
 4. Optionally turn on **Skip repeats** to leave out rows where nothing changed.
 5. Leave **Give each setting its own column** on to get one spreadsheet column per setting (temperature, position, mode and so on; for lights see [Lights: brightness and colour](#lights-brightness-and-colour)), or turn it off for a simple three-column file (five columns when several devices are chosen).

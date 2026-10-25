@@ -45,7 +45,7 @@ const LARGE_RESULT_THRESHOLD = 25000;
 const MAX_ENTITIES = 20;
 
 const ENTITY_HELP = "Pick one or more devices or sensors, like a light, thermostat or door.";
-const ENTITY_HELP_FULL = `You can export up to ${MAX_ENTITIES} at once.`;
+const ENTITY_HELP_FULL = `You can export up to ${MAX_ENTITIES} at once. Take one off the list to add another.`;
 
 const STYLES = `
   :host {
@@ -508,7 +508,7 @@ class ActivityExporterPanel extends HTMLElement {
   }
 
   /**
-   * Build one chosen row: a picker or name, and a button that removes it.
+   * Build one chosen row: a picker, which clears itself out with its own X, or a name with a button that removes it.
    */
   _createRow(id) {
     const row = document.createElement("li");
@@ -521,12 +521,12 @@ class ActivityExporterPanel extends HTMLElement {
       picker.value = id;
       picker.addEventListener("value-changed", (e) => this._changeChosen(row, e.detail.value || "", picker));
       row.appendChild(picker);
-    } else {
-      const name = document.createElement("span");
-      name.className = "chosen-name";
-      name.textContent = this._choiceLabel(id);
-      row.appendChild(name);
+      return row;
     }
+    const name = document.createElement("span");
+    name.className = "chosen-name";
+    name.textContent = this._choiceLabel(id);
+    row.appendChild(name);
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "remove";
@@ -571,7 +571,7 @@ class ActivityExporterPanel extends HTMLElement {
     this._els.chosenList.appendChild(this._createRow(id));
     this._syncSelectionControls();
     this._updateButtons();
-    if (this._entityIds.length >= MAX_ENTITIES) this._focusRemoveButton(MAX_ENTITIES - 1);
+    if (this._entityIds.length >= MAX_ENTITIES && !this._focusRemoveButton(MAX_ENTITIES - 1)) this._focusAddControl();
   }
 
   /**
@@ -643,7 +643,7 @@ class ActivityExporterPanel extends HTMLElement {
       const label = this._choiceLabel(row.dataset.id);
       const remove = row.querySelector("button.remove");
       const removeLabel = `Remove ${label}`;
-      if (remove.getAttribute("aria-label") !== removeLabel) remove.setAttribute("aria-label", removeLabel);
+      if (remove && remove.getAttribute("aria-label") !== removeLabel) remove.setAttribute("aria-label", removeLabel);
       const name = row.querySelector(".chosen-name");
       if (name && name.textContent !== label) name.textContent = label;
     });
