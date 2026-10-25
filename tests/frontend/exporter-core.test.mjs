@@ -5,11 +5,16 @@ import {
   PRESET_DAYS,
   attachCauses,
   buildFilename,
+  buildCacheKey,
   buildColumns,
+  buildExportGroups,
   buildJsonPayload,
+  buildMultiFilename,
+  buildMultiJsonPayload,
   chunkRangeByDay,
   computeRange,
   describeCause,
+  describeMissingHistory,
   filterRepeats,
   flattenAttributes,
   formatDateForFilename,
@@ -22,6 +27,8 @@ import {
   secondsSincePrevious,
   toCsv,
   toJson,
+  toMultiCsv,
+  toMultiJson,
   userNamesFromStates,
   wallClockToEpochMs,
 } from "../../custom_components/ha_activity_exporter/frontend/exporter-core.js";
@@ -1323,4 +1330,379 @@ test("buildJsonPayload: a matched record carries its raw cause and others carry 
   assert.deepEqual(payload.records[0].cause, SCRIPT_CAUSE);
   assert.equal("cause" in payload.records[1], false);
   assert.equal("cause" in payload.records[2], false);
+});
+
+// --- multi-entity ---------------------------------------------------------
+
+const M0 = 1768435200; // 2026-01-15T00:00:00Z
+
+/** Three entities' compressed rows as one history response. */
+function multiResponse() {
+  return {
+    "light.bedside": [
+      { s: "off", lu: M0, a: { friendly_name: "Bedside", supported_color_modes: ["hs"], color_mode: null, brightness: null } },
+      { s: "on", lu: M0 + 60, a: { friendly_name: "Bedside", supported_color_modes: ["hs"], color_mode: "hs", brightness: 26, hs_color: [30, 80] } },
+      { s: "on", lu: M0 + 90, lc: M0 + 60, a: { friendly_name: "Bedside", supported_color_modes: ["hs"], color_mode: "hs", brightness: 51, hs_color: [30, 70] } },
+    ],
+    "light.hall": [
+      { s: "on", lu: M0, a: { friendly_name: "Hall", supported_color_modes: ["color_temp"], color_mode: "color_temp", brightness: 255, color_temp_kelvin: 3000 } },
+      { s: "on", lu: M0 + 60, lc: M0 - 3600, a: { friendly_name: "Hall", supported_color_modes: ["color_temp"], color_mode: "color_temp", brightness: 128, color_temp_kelvin: 3000 } },
+    ],
+    "climate.lounge": [
+      { s: "heat", lu: M0 + 30, a: { friendly_name: "Lounge", hvac_modes: ["off", "heat"], current_temperature: -1.5, temperature: 21 } },
+    ],
+  };
+}
+
+const MULTI_IDS = ["light.bedside", "light.hall", "climate.lounge"];
+const MULTI_NAMES = { "light.bedside": "Bedside", "light.hall": "Hall", "climate.lounge": "Lounge" };
+
+/** The fixture as the groups the multi formatters take, in selection order. */
+function multiGroups() {
+  const response = multiResponse();
+  return MULTI_IDS.map((entityId) => ({
+    entityId,
+    friendlyName: MULTI_NAMES[entityId],
+    records: normaliseRecords(parseHistoryRecords(response, entityId)),
+  }));
+}
+
+// --- toMultiCsv -----------------------------------------------------------
+
+const MULTI_SPLIT_HEADER =
+  "entity_id,name,timestamp,value,seconds_since_previous,brightness,brightness_percent,color_mode,color_temp_kelvin,hue,saturation,current_temperature,temperature,details";
+
+/** Split CSV text into rows of cells, for fixtures with no quoted commas. */
+function csvCells(csv) {
+  return csv.split("\r\n").map((line) => line.split(","));
+}
+
+/** Build one group from [state, seconds, attributes] rows of a single entity. */
+function groupFrom(entityId, friendlyName, rows) {
+  const response = { [entityId]: rows.map(([s, seconds, a]) => ({ s, lu: M0 + seconds, a })) };
+  return { entityId, friendlyName, records: normaliseRecords(parseHistoryRecords(response, entityId)) };
+}
+
+// Checks rows run in time order across entities.
+test("toMultiCsv: rows are in time order across entities", () => {
+  const rows = csvCells(toMultiCsv(multiGroups(), "UTC")).slice(1);
+  assert.deepEqual(
+    rows.map((r) => [r[0], r[2]]),
+    [
+      ["light.bedside", "2026-01-15T00:00:00+00:00"],
+      ["light.hall", "2026-01-15T00:00:00+00:00"],
+      ["climate.lounge", "2026-01-15T00:00:30+00:00"],
+      ["light.bedside", "2026-01-15T00:01:00+00:00"],
+      ["light.hall", "2026-01-15T00:01:00+00:00"],
+      ["light.bedside", "2026-01-15T00:01:30+00:00"],
+    ]
+  );
+});
+
+// Checks rows at the same instant follow the selection order, not the id order.
+test("toMultiCsv: rows at the same time follow the selection order", () => {
+  const byId = Object.fromEntries(multiGroups().map((g) => [g.entityId, g]));
+  const order = ["light.hall", "light.bedside", "climate.lounge"];
+  const rows = csvCells(toMultiCsv(order.map((id) => byId[id]), "UTC")).slice(1);
+  assert.deepEqual(
+    rows.map((r) => r[0]),
+    ["light.hall", "light.bedside", "climate.lounge", "light.hall", "light.bedside", "light.bedside"]
+  );
+});
+
+// Checks the split header unions every entity's columns, light columns first.
+test("toMultiCsv: split header unions the columns with light columns first", () => {
+  assert.equal(toMultiCsv(multiGroups(), "UTC").split("\r\n")[0], MULTI_SPLIT_HEADER);
+});
+
+// Checks descriptive attributes stay out even though the names differ between entities.
+test("toMultiCsv: metadata is decided per entity, not across all of them", () => {
+  const header = toMultiCsv(multiGroups(), "UTC").split("\r\n")[0].split(",");
+  assert.equal(header.includes("brightness"), true);
+  for (const name of ["friendly_name", "supported_color_modes", "hvac_modes"]) {
+    assert.equal(header.includes(name), false, name);
+  }
+});
+
+// Checks each row is flattened with its own entity's columns and blanks elsewhere.
+test("toMultiCsv: cells hold each entity's own settings and are blank for others", () => {
+  const rows = csvCells(toMultiCsv(multiGroups(), "UTC")).slice(1);
+  assert.deepEqual(rows[1], ["light.hall", "Hall", "2026-01-15T00:00:00+00:00", "on", "", "255", "100", "color_temp", "3000", "", "", "", "", ""]);
+  assert.deepEqual(rows[2], ["climate.lounge", "Lounge", "2026-01-15T00:00:30+00:00", "heat", "", "", "", "", "", "", "", "-1.5", "21", ""]);
+  assert.deepEqual(rows[3], ["light.bedside", "Bedside", "2026-01-15T00:01:00+00:00", "on", "60", "26", "10.2", "hs", "", "30", "80", "", "", ""]);
+});
+
+// Checks the gap is measured to the same entity's previous row.
+test("toMultiCsv: seconds_since_previous is per entity", () => {
+  const rows = csvCells(toMultiCsv(multiGroups(), "UTC")).slice(1);
+  assert.deepEqual(
+    rows.map((r) => [r[0], r[4]]),
+    [
+      ["light.bedside", ""],
+      ["light.hall", ""],
+      ["climate.lounge", ""],
+      ["light.bedside", "60"],
+      ["light.hall", "60"],
+      ["light.bedside", "30"],
+    ]
+  );
+});
+
+// Checks the legacy layout is the fixed five columns with the raw attributes.
+test("toMultiCsv: legacy layout is entity_id,name,timestamp,value,details", () => {
+  const lines = toMultiCsv(multiGroups(), "UTC", { splitColumns: false }).split("\r\n");
+  assert.equal(lines[0], "entity_id,name,timestamp,value,details");
+  const prefix = "climate.lounge,Lounge,2026-01-15T00:00:30+00:00,heat,";
+  assert.equal(lines[3].startsWith(prefix), true);
+  const details = lines[3].slice(prefix.length);
+  assert.deepEqual(JSON.parse(details.slice(1, -1).replace(/""/g, '"')), multiGroups()[2].records[0].attributes);
+});
+
+// Checks attributes named like the multi fixed columns get the attribute_ prefix.
+test("toMultiCsv: name and entity_id attributes become attribute_ columns", () => {
+  const group = groupFrom("sensor.a", "Kitchen", [
+    ["on", 0, { name: "Probe", entity_id: "x.y", temperature: 20 }],
+    ["on", 10, { name: "Probe", entity_id: "x.z", temperature: 20 }],
+  ]);
+  const rows = csvCells(toMultiCsv([group], "UTC"));
+  assert.deepEqual(rows[0], ["entity_id", "name", "timestamp", "value", "seconds_since_previous", "attribute_entity_id", "attribute_name", "temperature", "details"]);
+  assert.deepEqual(rows[1], ["sensor.a", "Kitchen", "2026-01-15T00:00:00+00:00", "on", "", "x.y", "Probe", "20", ""]);
+});
+
+// Checks a name attribute keeps its own column in single-device output.
+test("toCsv: a name attribute is still a name column for one device", () => {
+  const group = groupFrom("sensor.a", "Kitchen", [["on", 0, { name: "Probe" }]]);
+  assert.equal(toCsv(group.records, "UTC").split("\r\n")[0], "timestamp,value,seconds_since_previous,name,details");
+});
+
+// Checks a spreadsheet formula in a friendly name is neutralised and a missing name is blank.
+test("toMultiCsv: the name column is escaped and blank when unknown", () => {
+  const groups = [
+    groupFrom("sensor.a", "=cmd", [["on", 0, {}]]),
+    groupFrom("sensor.b", undefined, [["on", 1, {}]]),
+  ];
+  const rows = csvCells(toMultiCsv(groups, "UTC")).slice(1);
+  assert.equal(rows[0][1], "'=cmd");
+  assert.equal(rows[1][1], "");
+  const legacy = csvCells(toMultiCsv(groups, "UTC", { splitColumns: false })).slice(1);
+  assert.equal(legacy[0][1], "'=cmd");
+  assert.equal(legacy[1][1], "");
+});
+
+// Checks attributes that do not fit a cell are kept in the details column.
+test("toMultiCsv: leftover attributes go in the details column", () => {
+  const group = groupFrom("sensor.a", "A", [["on", 0, { nested: { a: 1 } }]]);
+  const lines = toMultiCsv([group], "UTC").split("\r\n");
+  assert.equal(lines[0], "entity_id,name,timestamp,value,seconds_since_previous,details");
+  assert.equal(lines[1], 'sensor.a,A,2026-01-15T00:00:00+00:00,on,,"{""nested"":{""a"":1}}"');
+});
+
+// Checks changed_by appears when only one entity has a cause, and only on that row.
+test("toMultiCsv: changed_by appears when one entity has a cause", () => {
+  const groups = multiGroups();
+  groups[1].records[1].cause = { context_domain: "script", context_service: "sunrise" };
+  const rows = csvCells(toMultiCsv(groups, "UTC"));
+  assert.deepEqual(rows[0].slice(-2), ["changed_by", "details"]);
+  assert.deepEqual(rows.slice(1).map((r) => r[r.length - 2]), ["", "", "", "", "script.sunrise", ""]);
+});
+
+// Checks user names reach the changed_by text.
+test("toMultiCsv: changed_by uses the user names passed in", () => {
+  const groups = multiGroups();
+  groups[2].records[0].cause = { context_user_id: "u1" };
+  const rows = csvCells(toMultiCsv(groups, "UTC", { userNames: { u1: "Sam" } }));
+  assert.equal(rows[3][rows[3].length - 2], "Sam");
+});
+
+// Checks the legacy layout never gets a changed_by column.
+test("toMultiCsv: legacy layout has no changed_by column", () => {
+  const groups = multiGroups();
+  groups[1].records[1].cause = { context_domain: "script", context_service: "sunrise" };
+  const csv = toMultiCsv(groups, "UTC", { splitColumns: false });
+  assert.equal(csv.includes("light.hall"), true);
+  assert.equal(csv.includes("script.sunrise"), false);
+});
+
+// Checks Skip repeats applied per entity keeps rows another entity also repeats.
+test("toMultiCsv: repeats are filtered per entity before the merge", () => {
+  const a = groupFrom("sensor.a", "A", [["on", 0, {}], ["on", 60, {}], ["off", 120, {}]]);
+  const b = groupFrom("sensor.b", "B", [["on", 0, {}], ["on", 60, {}], ["off", 100, {}]]);
+  const groups = [a, b].map((g) => ({ ...g, records: filterRepeats(g.records) }));
+  const rows = csvCells(toMultiCsv(groups, "UTC")).slice(1);
+  assert.deepEqual(
+    rows.map((r) => [r[0], r[3], r[4]]),
+    [
+      ["sensor.a", "on", ""],
+      ["sensor.b", "on", ""],
+      ["sensor.b", "off", "100"],
+      ["sensor.a", "off", "120"],
+    ]
+  );
+});
+
+// --- buildMultiJsonPayload / toMultiJson / buildMultiFilename -------------
+
+const MULTI_META = {
+  exportedAtMs: (M0 + 7200) * 1000,
+  periodStartMs: M0 * 1000,
+  periodEndMs: (M0 + 3600) * 1000,
+  stateChangesOnly: true,
+};
+
+// Checks the wrapper lists entities in selection order with shared period and totals.
+test("buildMultiJsonPayload: wraps entities in selection order with shared period and totals", () => {
+  const payload = buildMultiJsonPayload(MULTI_META, multiGroups(), "UTC");
+  assert.deepEqual(Object.keys(payload), [
+    "exported_at",
+    "period",
+    "state_changes_only",
+    "entity_count",
+    "record_count",
+    "entities",
+  ]);
+  assert.equal(payload.exported_at, "2026-01-15T02:00:00+00:00");
+  assert.deepEqual(payload.period, { start: "2026-01-15T00:00:00+00:00", end: "2026-01-15T01:00:00+00:00" });
+  assert.equal(payload.state_changes_only, true);
+  assert.equal(payload.entity_count, 3);
+  assert.equal(payload.record_count, 6);
+  assert.deepEqual(payload.entities.map((e) => e.entity_id), MULTI_IDS);
+  assert.deepEqual(Object.keys(payload.entities[0]), ["entity_id", "friendly_name", "entity", "record_count", "records"]);
+});
+
+// Checks each entity block matches an independently built single-entity payload.
+test("buildMultiJsonPayload: each entity block deep-equals buildJsonPayload for that entity minus the shared keys", () => {
+  const groups = multiGroups();
+  const payload = buildMultiJsonPayload(MULTI_META, groups, "UTC");
+  groups.forEach((group, i) => {
+    const expected = buildJsonPayload({ ...MULTI_META, entityId: group.entityId, friendlyName: group.friendlyName }, group.records, "UTC");
+    delete expected.exported_at;
+    delete expected.period;
+    delete expected.state_changes_only;
+    assert.deepEqual(payload.entities[i], expected);
+  });
+});
+
+// Checks the start-of-period marker is decided per entity, not on the merged list.
+test("buildMultiJsonPayload: start_of_period is marked per entity", () => {
+  const payload = buildMultiJsonPayload(MULTI_META, multiGroups(), "UTC");
+  const first = (id) => payload.entities.find((e) => e.entity_id === id).records[0];
+  assert.equal(first("light.bedside").derived.start_of_period, true);
+  assert.equal(first("light.hall").derived.start_of_period, true);
+  assert.equal("start_of_period" in first("climate.lounge").derived, false);
+  assert.equal(first("light.hall").last_changed, null);
+  assert.equal(first("climate.lounge").last_changed, "2026-01-15T00:00:30+00:00");
+});
+
+// Checks an entity asked for with no rows is still listed.
+test("buildMultiJsonPayload: an entity with no records is listed with record_count 0", () => {
+  const groups = multiGroups();
+  groups[1] = { ...groups[1], records: [] };
+  const payload = buildMultiJsonPayload(MULTI_META, groups, "UTC");
+  assert.equal(payload.entity_count, 3);
+  assert.equal(payload.record_count, 4);
+  assert.equal(payload.entities[1].entity_id, "light.hall");
+  assert.equal(payload.entities[1].record_count, 0);
+  assert.deepEqual(payload.entities[1].records, []);
+});
+
+// Checks toMultiJson prints the payload with two-space indentation.
+test("toMultiJson: pretty-prints the payload with two spaces", () => {
+  const groups = multiGroups();
+  const text = toMultiJson(MULTI_META, groups, "UTC");
+  assert.equal(text, JSON.stringify(buildMultiJsonPayload(MULTI_META, groups, "UTC"), null, 2));
+  assert.equal(text.split("\n")[1], '  "exported_at": "2026-01-15T02:00:00+00:00",');
+});
+
+// Checks the multi filename carries the count and the date range.
+test("buildMultiFilename: 3 items and the date range", () => {
+  const start = Date.UTC(2026, 0, 15, 0, 0, 0);
+  const end = Date.UTC(2026, 0, 16, 0, 0, 0);
+  assert.equal(
+    buildMultiFilename(3, start, end, "json", "UTC"),
+    "activity-export_3-items_2026-01-15_2026-01-16.json"
+  );
+});
+
+// --- buildCacheKey, buildExportGroups, describeMissingHistory -------------
+
+// Checks the same devices in any order share one cache key.
+test("buildCacheKey: selection order does not change the key", () => {
+  assert.equal(
+    buildCacheKey(["light.hall", "light.bedside", "climate.lounge"], 10, 20),
+    buildCacheKey(["climate.lounge", "light.hall", "light.bedside"], 10, 20)
+  );
+  assert.equal(buildCacheKey(["b", "a"], 10, 20), "a,b|10|20");
+});
+
+// Checks a different device set or range gives a different cache key.
+test("buildCacheKey: a different device set or range changes the key", () => {
+  const base = buildCacheKey(["a", "b"], 10, 20);
+  assert.notEqual(base, buildCacheKey(["a", "c"], 10, 20));
+  assert.notEqual(base, buildCacheKey(["a"], 10, 20));
+  assert.notEqual(base, buildCacheKey(["a", "b"], 11, 20));
+  assert.notEqual(base, buildCacheKey(["a", "b"], 10, 21));
+});
+
+/** Build a records Map from {id: [[state, seconds], ...]} using plain records. */
+function recordsMap(spec) {
+  return new Map(
+    Object.entries(spec).map(([id, rows]) => [
+      id,
+      rows.map(([state, seconds]) => ({
+        timestampMs: (M0 + seconds) * 1000,
+        lastChangedMs: (M0 + seconds) * 1000,
+        state,
+        attributes: {},
+      })),
+    ])
+  );
+}
+
+// Checks groups follow the selection order and carry friendly names.
+test("buildExportGroups: groups follow selection order with friendly names", () => {
+  const map = recordsMap({ "light.a": [["on", 0]], "light.b": [["on", 1]] });
+  const states = { "light.a": { attributes: { friendly_name: "Alpha" } }, "light.b": { attributes: {} } };
+  const groups = buildExportGroups(["light.b", "light.a"], map, states, false);
+  assert.deepEqual(
+    groups.map((g) => [g.entityId, g.friendlyName, g.records.length]),
+    [["light.b", null, 1], ["light.a", "Alpha", 1]]
+  );
+});
+
+// Checks a selected device with no cached records becomes an empty group.
+test("buildExportGroups: a device with no records gives an empty group", () => {
+  const groups = buildExportGroups(["light.a", "light.gone"], recordsMap({ "light.a": [["on", 0]] }), {}, false);
+  assert.equal(groups[1].entityId, "light.gone");
+  assert.deepEqual(groups[1].records, []);
+});
+
+// Checks Skip repeats works on each device's own rows, so another device's rows never hide a change.
+test("buildExportGroups: Skip repeats is applied to each device on its own", () => {
+  const map = recordsMap({
+    "light.a": [["on", 0], ["on", 2], ["off", 4]],
+    "light.b": [["on", 1], ["off", 3], ["off", 5]],
+  });
+  const groups = buildExportGroups(["light.a", "light.b"], map, {}, true);
+  assert.deepEqual(groups[0].records.map((r) => r.state), ["on", "off"]);
+  assert.deepEqual(groups[1].records.map((r) => r.state), ["on", "off"]);
+  const csv = toMultiCsv(groups, "UTC", { splitColumns: false });
+  assert.equal(csv.split("\r\n").length, 1 + 4);
+});
+
+// Checks every row is kept when Skip repeats is off.
+test("buildExportGroups: keeps every row when Skip repeats is off", () => {
+  const map = recordsMap({ "light.a": [["on", 0], ["on", 2], ["off", 4]] });
+  const groups = buildExportGroups(["light.a"], map, {}, false);
+  assert.equal(groups[0].records.length, 3);
+});
+
+// Checks the missing history sentence for one, two and three devices.
+test("describeMissingHistory: names the devices in plain language", () => {
+  assert.equal(describeMissingHistory([]), "");
+  assert.equal(describeMissingHistory(["Hall"]), "No history for Hall in this period.");
+  assert.equal(describeMissingHistory(["Hall", "Garage"]), "No history for Hall and Garage in this period.");
+  assert.equal(
+    describeMissingHistory(["Hall", "Garage", "Lounge"]),
+    "No history for Hall, Garage and Lounge in this period."
+  );
 });

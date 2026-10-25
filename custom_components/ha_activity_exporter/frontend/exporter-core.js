@@ -332,10 +332,11 @@ function isScalar(value) {
  * Give a column name the attribute_ prefix when it matches a fixed column.
  *
  * @param {string} name
+ * @param {Set<string>} [fixed] the fixed column names to avoid
  * @returns {string}
  */
-function columnName(name) {
-  return FIXED_COLUMNS.has(name) ? `attribute_${name}` : name;
+function columnName(name, fixed = FIXED_COLUMNS) {
+  return fixed.has(name) ? `attribute_${name}` : name;
 }
 
 /**
@@ -355,14 +356,15 @@ function brightnessPercent(brightness) {
  *
  * @param {object} attributes
  * @param {Set<string>} metadata keys from metadataKeys()
+ * @param {Set<string>} [fixed] the fixed column names an attribute must not reuse
  * @returns {{cells: Record<string, any>, leftovers: Record<string, any>}}
  */
-export function flattenAttributes(attributes, metadata) {
+export function flattenAttributes(attributes, metadata, fixed = FIXED_COLUMNS) {
   const cells = {};
   const leftovers = {};
   for (const [key, value] of Object.entries(attributes || {})) {
     if (metadata.has(key) || value == null || TUPLE_NAMES.has(key)) continue;
-    const column = columnName(key);
+    const column = columnName(key, fixed);
     if (column in cells) leftovers[key] = value;
     else if (isScalar(value)) cells[column] = value;
     else if (Array.isArray(value) && value.every(isScalar)) cells[column] = JSON.stringify(value);
@@ -392,24 +394,36 @@ export function flattenAttributes(attributes, metadata) {
 }
 
 /**
+ * Order setting column names with light columns first and the rest alphabetically.
+ *
+ * @param {Iterable<string>} names
+ * @returns {string[]}
+ */
+function orderColumns(names) {
+  const present = new Set(names);
+  const light = LIGHT_COLUMNS.filter((name) => present.has(name));
+  const rest = [...present].filter((name) => !LIGHT_COLUMNS.includes(name)).sort();
+  return [...light, ...rest];
+}
+
+/**
  * List the attribute columns that hold a value in at least one record, light
  * columns first and the rest alphabetically.
  *
  * @param {{attributes: object}[]} records
  * @param {Set<string>} metadata keys from metadataKeys()
+ * @param {Set<string>} [fixed] the fixed column names an attribute must not reuse
  * @returns {string[]}
  */
-export function buildColumns(records, metadata) {
+export function buildColumns(records, metadata, fixed = FIXED_COLUMNS) {
   const present = new Set();
   for (const r of records) {
-    const { cells } = flattenAttributes(r.attributes, metadata);
+    const { cells } = flattenAttributes(r.attributes, metadata, fixed);
     for (const [name, value] of Object.entries(cells)) {
       if (value !== "") present.add(name);
     }
   }
-  const light = LIGHT_COLUMNS.filter((name) => present.has(name));
-  const rest = [...present].filter((name) => !LIGHT_COLUMNS.includes(name)).sort();
-  return [...light, ...rest];
+  return orderColumns(present);
 }
 
 // --- causes ---------------------------------------------------------------
@@ -585,6 +599,56 @@ export function buildFilename(entityId, startMs, endMs, ext, timeZone) {
   return `${base}.${ext}`;
 }
 
+/** Build the multi-device download filename: activity-export_{N}-items_{startDate}_{endDate}.{ext} */
+export function buildMultiFilename(count, startMs, endMs, ext, timeZone) {
+  const base = `activity-export_${count}-items_${formatDateForFilename(
+    startMs,
+    timeZone
+  )}_${formatDateForFilename(endMs, timeZone)}`;
+  return `${base}.${ext}`;
+}
+
+/** Build the cache key for a fetch: the sorted ids, then the range, so selection order does not matter. */
+export function buildCacheKey(entityIds, startMs, endMs) {
+  return `${[...entityIds].sort().join(",")}|${startMs}|${endMs}`;
+}
+
+/**
+ * Build one group per selected device, in selection order, with Skip repeats
+ * applied to each device's own records.
+ *
+ * @param {string[]} entityIds in selection order
+ * @param {Map<string, object[]>} recordsById normalised records per device
+ * @param {Record<string, {attributes?: Record<string, any>}>} [states] used for friendly names
+ * @param {boolean} [skipRepeats]
+ * @returns {{entityId: string, friendlyName: string|null, records: object[]}[]}
+ */
+export function buildExportGroups(entityIds, recordsById, states, skipRepeats = false) {
+  return entityIds.map((entityId) => {
+    const records = recordsById.get(entityId) || [];
+    return {
+      entityId,
+      friendlyName: states?.[entityId]?.attributes?.friendly_name || null,
+      records: skipRepeats ? filterRepeats(records) : records,
+    };
+  });
+}
+
+/**
+ * Say which devices have no history in the period, in plain language.
+ *
+ * @param {string[]} names display names of the devices with no rows
+ * @returns {string} empty when every device has rows
+ */
+export function describeMissingHistory(names) {
+  if (!names.length) return "";
+  const list =
+    names.length === 1
+      ? names[0]
+      : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+  return `No history for ${list} in this period.`;
+}
+
 /** Matches text that is a plain number, so a spreadsheet keeps it numeric. */
 const NUMERIC_TEXT = /^-?\d+(\.\d+)?(e[+-]?\d+)?$/i;
 
@@ -614,32 +678,51 @@ export function secondsSincePrevious(records, index) {
   return Math.round(records[index].timestampMs - records[index - 1].timestampMs) / 1000;
 }
 
+/** Fixed columns of the multi-device split layout. */
+const MULTI_FIXED_COLUMNS = new Set([...FIXED_COLUMNS, "entity_id", "name"]);
+
 /**
- * Build CSV text with CRLF line endings, one column per setting unless splitColumns is false.
+ * Build CSV text for one or more devices, with entity_id and name columns first
+ * when `withEntity` is set and rows in time order across devices.
  *
- * @param {{timestampMs:number, state:string, attributes:object, cause?:object}[]} records oldest-first
- * @param {string} [timeZone]
- * @param {{splitColumns?: boolean, userNames?: Record<string, string>}} [options]
+ * @param {{entityId: string, friendlyName?: string, records: {timestampMs:number, state:string, attributes:object, cause?:object}[]}[]} groups
+ * @param {string|undefined} timeZone
+ * @param {{splitColumns?: boolean, userNames?: Record<string, string>}} options
+ * @param {boolean} withEntity
+ * @returns {string}
  */
-export function toCsv(records, timeZone, { splitColumns = true, userNames } = {}) {
+function buildCsv(groups, timeZone, { splitColumns = true, userNames } = {}, withEntity) {
+  const fixed = withEntity ? MULTI_FIXED_COLUMNS : FIXED_COLUMNS;
+  const entityHeader = withEntity ? ["entity_id", "name"] : [];
+  const entityCells = (group) => (withEntity ? [group.entityId, group.friendlyName] : []);
+  const rows = groups.flatMap((group) =>
+    group.records.map((record, index) => ({ group, record, index }))
+  );
+  if (withEntity) rows.sort((a, b) => a.record.timestampMs - b.record.timestampMs);
   if (!splitColumns) {
-    const lines = ["timestamp,value,details"];
-    for (const r of records) {
+    const lines = [[...entityHeader, "timestamp", "value", "details"].join(",")];
+    for (const { group, record } of rows) {
       lines.push(
         [
-          csvEscape(formatTimestamp(r.timestampMs, timeZone)),
-          csvEscape(r.state),
-          csvEscape(JSON.stringify(r.attributes || {})),
-        ].join(",")
+          ...entityCells(group),
+          formatTimestamp(record.timestampMs, timeZone),
+          record.state,
+          JSON.stringify(record.attributes || {}),
+        ]
+          .map(csvEscape)
+          .join(",")
       );
     }
     return lines.join("\r\n");
   }
-  const metadata = metadataKeys(records);
-  const columns = buildColumns(records, metadata);
-  const showCauses = records.some((r) => describeCause(r.cause, userNames) !== "");
+  const metadata = new Map(groups.map((group) => [group, metadataKeys(group.records)]));
+  const columns = orderColumns(
+    groups.flatMap((group) => buildColumns(group.records, metadata.get(group), fixed))
+  );
+  const showCauses = rows.some(({ record }) => describeCause(record.cause, userNames) !== "");
   const lines = [
     [
+      ...entityHeader,
       "timestamp",
       "value",
       "seconds_since_previous",
@@ -650,23 +733,48 @@ export function toCsv(records, timeZone, { splitColumns = true, userNames } = {}
       .map(csvEscape)
       .join(","),
   ];
-  records.forEach((r, index) => {
-    const { cells, leftovers } = flattenAttributes(r.attributes, metadata);
+  for (const { group, record, index } of rows) {
+    const { cells, leftovers } = flattenAttributes(record.attributes, metadata.get(group), fixed);
     const details = Object.keys(leftovers).length ? JSON.stringify(leftovers) : "";
     lines.push(
       [
-        formatTimestamp(r.timestampMs, timeZone),
-        r.state,
-        secondsSincePrevious(records, index),
+        ...entityCells(group),
+        formatTimestamp(record.timestampMs, timeZone),
+        record.state,
+        secondsSincePrevious(group.records, index),
         ...columns.map((name) => cells[name]),
-        ...(showCauses ? [describeCause(r.cause, userNames)] : []),
+        ...(showCauses ? [describeCause(record.cause, userNames)] : []),
         details,
       ]
         .map(csvEscape)
         .join(",")
     );
-  });
+  }
   return lines.join("\r\n");
+}
+
+/**
+ * Build CSV text with CRLF line endings, one column per setting unless splitColumns is false.
+ *
+ * @param {{timestampMs:number, state:string, attributes:object, cause?:object}[]} records oldest-first
+ * @param {string} [timeZone]
+ * @param {{splitColumns?: boolean, userNames?: Record<string, string>}} [options]
+ */
+export function toCsv(records, timeZone, options) {
+  return buildCsv([{ entityId: "", records }], timeZone, options, false);
+}
+
+/**
+ * Build one CSV timeline for several devices, with entity_id and name columns,
+ * rows in time order and ties in the order the groups are given.
+ *
+ * @param {{entityId: string, friendlyName?: string, records: {timestampMs:number, state:string, attributes:object, cause?:object}[]}[]} groups
+ *   in selection order, each with oldest-first records already filtered as wanted
+ * @param {string} [timeZone]
+ * @param {{splitColumns?: boolean, userNames?: Record<string, string>}} [options]
+ */
+export function toMultiCsv(groups, timeZone, options) {
+  return buildCsv(groups, timeZone, options, true);
 }
 
 /**
@@ -792,4 +900,45 @@ export function buildJsonPayload(meta, records, timeZone) {
 /** Build pretty-printed JSON text. */
 export function toJson(meta, records, timeZone) {
   return JSON.stringify(buildJsonPayload(meta, records, timeZone), null, 2);
+}
+
+/**
+ * Build the multi-device JSON payload: shared period and totals, then one block
+ * per device in the order given, each built by buildJsonPayload.
+ *
+ * @param {{exportedAtMs:number, periodStartMs:number, periodEndMs:number,
+ *          stateChangesOnly:boolean}} meta
+ * @param {{entityId:string, friendlyName?:string, records:object[]}[]} groups
+ * @param {string} [timeZone]
+ */
+export function buildMultiJsonPayload(meta, groups, timeZone) {
+  const entities = groups.map((group) => {
+    const {
+      exported_at: _exportedAt,
+      period: _period,
+      state_changes_only: _stateChangesOnly,
+      ...block
+    } = buildJsonPayload(
+      { ...meta, entityId: group.entityId, friendlyName: group.friendlyName },
+      group.records,
+      timeZone
+    );
+    return block;
+  });
+  return {
+    exported_at: formatTimestamp(meta.exportedAtMs, timeZone),
+    period: {
+      start: formatTimestamp(meta.periodStartMs, timeZone),
+      end: formatTimestamp(meta.periodEndMs, timeZone),
+    },
+    state_changes_only: !!meta.stateChangesOnly,
+    entity_count: groups.length,
+    record_count: groups.reduce((total, group) => total + group.records.length, 0),
+    entities,
+  };
+}
+
+/** Build pretty-printed multi-device JSON text. */
+export function toMultiJson(meta, groups, timeZone) {
+  return JSON.stringify(buildMultiJsonPayload(meta, groups, timeZone), null, 2);
 }

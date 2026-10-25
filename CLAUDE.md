@@ -5,16 +5,21 @@ Guidance for Claude Code (and humans) working in this repo.
 ## What this is
 
 A HACS-distributed Home Assistant **custom integration** that adds one **sidebar
-panel** for exporting a single entity's history to **CSV** or **JSON**. The
+panel** for exporting the history of one entity, or up to 20 at once, to **CSV** or **JSON**. The
 primary consumer of the output is an LLM, so the data is dumped faithfully (with
 an optional "skip repeats" filter that keeps any row where the value or a
 setting changed), never aggregated or interpreted. The CSV gives each setting its
 own column by default (`timestamp,value,seconds_since_previous,<settings>,details`).
+Choosing several entities gives one timeline in one file: the CSV gains an
+`entity_id,name,` prefix, rows run in time order across entities and
+`seconds_since_previous` is per entity; the JSON wraps an `entities[]` list. One
+entity's output is unchanged.
 
 Design docs: `docs/plans/2026-05-31-ha-activity-exporter-design.md`, then
 `docs/plans/2026-10-25-settings-detail-export-design.md` (settings columns, which supersedes parts of it)
 Plans + built-vs-intended notes: `.ai/implementation-plans/ha-activity-exporter.md`,
-then `.ai/implementation-plans/2026-10-25-settings-detail-export.md`
+then `.ai/implementation-plans/2026-10-25-settings-detail-export.md`,
+then `.ai/implementation-plans/2026-10-25-multi-entity-export.md` (several-entity export)
 
 ## Architecture (one sentence)
 
@@ -39,7 +44,9 @@ custom_components/ha_activity_exporter/
 1. **Plain language, zero HA jargon in the UI.** The target audience does not
    know Home Assistant. Never expose "entity", "state", "recorder", or
    "significant changes" in visible copy. (The CSV header starts `timestamp,value`, and is
-   exactly `timestamp,value,details` when per-setting columns are off;
+   exactly `timestamp,value,details` when per-setting columns are off; with several entities
+   it starts `entity_id,name,timestamp,value` and is `entity_id,name,timestamp,value,details`
+   when per-setting columns are off;
    the JSON payload keeps faithful HA keys — `state`, `attributes` — as a stable
    machine schema for LLMs.)
 2. **No build step, no CDN/runtime deps in the frontend.** It must work on
@@ -75,6 +82,17 @@ custom_components/ha_activity_exporter/
   selects literal 0 for both timestamps. Its real `last_changed` is not available
   from `history_during_period`, so the JSON marks that first row
   `start_of_period: true` with `last_changed: null` instead of claiming a change.
+- `ha-entity-picker` (and the plural `ha-entities-picker`) have **no `hass`
+  property** since home-assistant/frontend PR #52833 (2026-06-24): they read states
+  and registries from Lit context, so they only work as DOM descendants of HA's
+  context provider. Both are lazy-loaded by HA pages and may be undefined when the
+  panel renders, which is why the datalist fallback exists. The panel still sets
+  `picker.hass` for HA versions before that change; on newer ones it is ignored.
+- Since HA 2024.8 (core PR #121776) lights mark `brightness`, `color_mode`,
+  `color_temp(_kelvin)`, `effect` and `hs/rgb/rgbw/rgbww/xy_color` as unrecorded, so
+  `history_during_period` never returns them for a `light.*`. Settings-only rows still
+  arrive (each with a new `lu`) but carry none of those attributes. A template sensor
+  copying them is recorded normally (verified on 2026.10.4); the README documents it.
 - `single_config_entry: true` in the manifest makes core handle single-instance
   (aborts the second flow, hides "Add") — no manual guard needed.
 - **manifest.json keys must be ordered `domain, name, then alphabetical`** or

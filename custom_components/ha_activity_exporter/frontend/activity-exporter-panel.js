@@ -2,9 +2,9 @@
  * Activity Exporter sidebar panel.
  *
  * A self-contained vanilla web component (no build step, no external/CDN
- * dependencies). It reads a single entity's history over the authenticated
- * Home Assistant WebSocket connection, builds a CSV or JSON file in the
- * browser, and downloads it. All formatting logic lives in exporter-core.js so
+ * dependencies). It reads the history of one or more devices over the
+ * authenticated Home Assistant WebSocket connection, builds a CSV or JSON file
+ * in the browser, and downloads it. All formatting logic lives in exporter-core.js so
  * it can be unit-tested without a DOM.
  *
  * Audience note: this UI is for people who do NOT know Home Assistant
@@ -14,15 +14,20 @@
 
 import {
   attachCauses,
+  buildCacheKey,
+  buildExportGroups,
   buildFilename,
+  buildMultiFilename,
   chunkRangeByDay,
   computeRange,
-  filterRepeats,
+  describeMissingHistory,
   normaliseRecords,
   parseHistoryRecords,
   parseLogbookEntries,
   toCsv,
   toJson,
+  toMultiCsv,
+  toMultiJson,
   userNamesFromStates,
 } from "./exporter-core.js";
 
@@ -35,6 +40,12 @@ const PRESETS = {
 
 // Above this many rows we show a gentle heads-up before the download.
 const LARGE_RESULT_THRESHOLD = 25000;
+
+// The most devices or sensors one download can hold.
+const MAX_ENTITIES = 20;
+
+const ENTITY_HELP = "Pick one or more devices or sensors, like a light, thermostat or door.";
+const ENTITY_HELP_FULL = `You can export up to ${MAX_ENTITIES} at once.`;
 
 const STYLES = `
   :host {
@@ -75,6 +86,33 @@ const STYLES = `
     font: inherit;
     font-size: 1rem;
   }
+  .chosen-list { list-style: none; margin: 0 0 10px; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  .chosen-list[hidden], #entity-control[hidden] { display: none; }
+  .chosen-row { display: flex; align-items: center; gap: 8px; }
+  .chosen-row ha-entity-picker { flex: 1 1 auto; min-width: 0; width: auto; }
+  .chosen-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    box-sizing: border-box;
+    padding: 12px;
+    border: 1px solid var(--divider-color, #ccc);
+    border-radius: 8px;
+    background: var(--secondary-background-color, #fafafa);
+    overflow-wrap: anywhere;
+  }
+  button.remove {
+    flex: none;
+    min-height: 44px;
+    padding: 0 14px;
+    border: 1px solid var(--divider-color, #ccc);
+    border-radius: 8px;
+    background: var(--card-background-color, #fff);
+    color: var(--primary-text-color);
+    font: inherit;
+    font-size: 0.95rem;
+    cursor: pointer;
+  }
+  button.remove:hover { border-color: var(--primary-color); }
   .presets { display: flex; flex-wrap: wrap; gap: 8px; }
   .chip {
     border: 1px solid var(--divider-color, #ccc);
@@ -150,7 +188,7 @@ const STYLES = `
   .status.success { background: rgba(var(--rgb-success-color, 67,160,71), 0.12); border-color: rgba(var(--rgb-success-color, 67,160,71), 0.5); }
   .status.warn { background: rgba(var(--rgb-warning-color, 255,160,0), 0.14); border-color: rgba(var(--rgb-warning-color, 255,160,0), 0.5); }
   /* Visible keyboard focus on every interactive control. */
-  .chip:focus-visible, button.export:focus-visible, .toggle-row input:focus-visible { outline: 2px solid var(--primary-text-color); outline-offset: 2px; }
+  .chip:focus-visible, button.export:focus-visible, button.remove:focus-visible, .toggle-row input:focus-visible, .entity-fallback input:focus-visible { outline: 2px solid var(--primary-text-color); outline-offset: 2px; }
   .chip[aria-pressed="true"]:focus-visible, #export-csv:focus-visible { outline-color: var(--text-primary-color, #fff); }
   :host(.narrow) .card { padding: 16px; }
   :host(.narrow) button.export { flex-basis: 100%; }
@@ -168,19 +206,22 @@ class ActivityExporterPanel extends HTMLElement {
     this._built = false;
 
     // Form state.
-    this._entityId = "";
+    this._entityIds = [];
+    this._controlMode = null;
     this._preset = "7d";
     this._customStart = "";
     this._customEnd = "";
     this._skipRepeats = false;
     this._splitColumns = true;
 
-    // Cache of raw (unfiltered) records keyed by entity+range, so switching
-    // format or toggling "skip repeats" or "own column" never refetches.
+    // Cache of raw (unfiltered) records per device, keyed by the sorted device
+    // ids and the range, so switching format, order, "skip repeats" or "own
+    // column" never refetches.
     this._cacheKey = null;
     this._cacheRecords = null;
     this._cacheCausesUnavailable = false;
     this._causesUnavailable = false;
+    this._pickerExclusions = new WeakMap();
 
     this._busy = false;
   }
@@ -224,8 +265,9 @@ class ActivityExporterPanel extends HTMLElement {
         <p class="intro">Export the history of any device or sensor to a file you can open in a spreadsheet or hand to an AI for analysis.</p>
 
         <div class="field" id="entity-field">
-          <label class="title" for="entity-control">What do you want to export?</label>
-          <p class="help">Pick a device or sensor — like a light, thermostat, or door.</p>
+          <label class="title" id="entity-title" for="entity-add" tabindex="-1">What do you want to export?</label>
+          <p class="help" id="entity-help" aria-live="polite">${ENTITY_HELP}</p>
+          <ul class="chosen-list" id="chosen-list" aria-label="Chosen devices and sensors" hidden></ul>
           <div id="entity-control"></div>
         </div>
 
@@ -260,7 +302,7 @@ class ActivityExporterPanel extends HTMLElement {
             <input type="checkbox" id="split-columns" checked />
             <span class="toggle-text">
               <span class="label">Give each setting its own column</span>
-              <span class="help toggle-help">Puts things like brightness, colour and temperature in separate spreadsheet columns. Turn off for a simple three-column file.</span>
+              <span class="help toggle-help">Puts things like temperature, position and mode in separate spreadsheet columns. Turn off for a simpler file with fewer columns.</span>
             </span>
           </label>
         </div>
@@ -287,6 +329,9 @@ class ActivityExporterPanel extends HTMLElement {
 
     this._els = {
       entityControl: root.getElementById("entity-control"),
+      entityTitle: root.getElementById("entity-title"),
+      entityHelp: root.getElementById("entity-help"),
+      chosenList: root.getElementById("chosen-list"),
       presets: root.querySelector(".presets"),
       customDates: root.getElementById("custom-dates"),
       startDate: root.getElementById("start-date"),
@@ -369,66 +414,264 @@ class ActivityExporterPanel extends HTMLElement {
 
   // --- Entity selection ---------------------------------------------------
 
+  /**
+   * Sync the add control and chosen rows with the available Home Assistant elements and states.
+   */
   _refreshEntityControl() {
     if (!this._built || !this._hass) return;
-    const host = this._els.entityControl;
-
-    if (customElements.get("ha-entity-picker")) {
-      let picker = host.querySelector("ha-entity-picker");
-      if (!picker) {
-        host.innerHTML = "";
-        picker = document.createElement("ha-entity-picker");
-        picker.id = "entity-control";
-        picker.allowCustomEntity = false;
-        // Give the picker its own accessible name (a <label for> does not
-        // reliably associate with a custom element's inner input).
-        picker.label = "What do you want to export?";
-        picker.addEventListener("value-changed", (e) => {
-          this._entityId = e.detail.value || "";
-          this._invalidateCache();
-          this._updateButtons();
-        });
-        host.appendChild(picker);
-        // Carry over any selection made via the fallback before the picker
-        // became available.
-        if (this._entityId) picker.value = this._entityId;
+    const mode = customElements.get("ha-entity-picker") ? "picker" : "fallback";
+    const modeChanged = this._controlMode !== mode;
+    if (modeChanged) {
+      this._controlMode = mode;
+      this._buildAddControl();
+    }
+    if (mode === "fallback") {
+      this._populateFallbackOptions();
+    } else {
+      const pickers = [this._addControl(), ...this._els.chosenList.querySelectorAll("ha-entity-picker")];
+      for (const picker of pickers) {
+        if (picker.hass !== this._hass) picker.hass = this._hass;
       }
-      picker.hass = this._hass;
+    }
+    if (modeChanged) this._renderChosen();
+    this._syncSelectionControls();
+  }
+
+  /**
+   * Return the element that adds another device: the picker or the fallback input.
+   */
+  _addControl() {
+    return this._els.entityControl.querySelector("#entity-add");
+  }
+
+  /**
+   * Build the control that adds one device: ha-entity-picker when available, else a datalist input.
+   */
+  _buildAddControl() {
+    const host = this._els.entityControl;
+    host.innerHTML = "";
+    if (this._controlMode === "picker") {
+      const picker = document.createElement("ha-entity-picker");
+      picker.id = "entity-add";
+      picker.allowCustomEntity = false;
+      picker.addEventListener("value-changed", (e) => {
+        const id = e.detail.value || "";
+        if (!id) return;
+        this._addEntity(id);
+        picker.value = "";
+      });
+      host.appendChild(picker);
       return;
     }
 
     // Fallback: a searchable text input backed by a datalist. Used only when
     // ha-entity-picker is not available in the running Home Assistant build.
-    if (!host.querySelector(".entity-fallback")) {
-      host.innerHTML = "";
-      const wrap = document.createElement("div");
-      wrap.className = "entity-fallback";
-      const input = document.createElement("input");
-      input.type = "text";
-      input.id = "entity-control";
-      input.setAttribute("list", "entity-options");
-      input.placeholder = "Start typing a name…";
-      const list = document.createElement("datalist");
-      list.id = "entity-options";
-      input.addEventListener("change", () => {
-        this._entityId = this._resolveFallbackValue(input.value);
-        this._invalidateCache();
-        this._updateButtons();
-      });
-      wrap.appendChild(input);
-      wrap.appendChild(list);
-      host.appendChild(wrap);
-    }
-    this._populateFallbackOptions();
+    this._fallbackSignature = null;
+    const wrap = document.createElement("div");
+    wrap.className = "entity-fallback";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.id = "entity-add";
+    input.setAttribute("list", "entity-options");
+    input.placeholder = "Start typing a name…";
+    const list = document.createElement("datalist");
+    list.id = "entity-options";
+    input.addEventListener("change", () => {
+      const id = this._resolveFallbackValue(input.value);
+      if (!id) return;
+      this._addEntity(id);
+      input.value = "";
+    });
+    wrap.appendChild(input);
+    wrap.appendChild(list);
+    host.appendChild(wrap);
   }
 
+  /**
+   * Rebuild every chosen row from the current selection.
+   */
+  _renderChosen() {
+    const list = this._els.chosenList;
+    list.innerHTML = "";
+    for (const id of this._entityIds) list.appendChild(this._createRow(id));
+    this._syncSelectionControls();
+  }
+
+  /**
+   * Name to show for a chosen device: the friendly name, with its id to tell duplicate names apart in the fallback.
+   */
+  _choiceLabel(id) {
+    if (this._controlMode === "fallback" && this._fallbackDisplay?.has(id)) {
+      return this._fallbackDisplay.get(id);
+    }
+    return this._hass?.states?.[id]?.attributes?.friendly_name || id;
+  }
+
+  /**
+   * Build one chosen row: a picker or name, and a button that removes it.
+   */
+  _createRow(id) {
+    const row = document.createElement("li");
+    row.className = "chosen-row";
+    row.dataset.id = id;
+    if (this._controlMode === "picker") {
+      const picker = document.createElement("ha-entity-picker");
+      picker.allowCustomEntity = false;
+      picker.hass = this._hass;
+      picker.value = id;
+      picker.addEventListener("value-changed", (e) => this._changeChosen(row, e.detail.value || "", picker));
+      row.appendChild(picker);
+    } else {
+      const name = document.createElement("span");
+      name.className = "chosen-name";
+      name.textContent = this._choiceLabel(id);
+      row.appendChild(name);
+    }
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "remove";
+    remove.textContent = "Remove";
+    remove.addEventListener("click", () => this._removeEntity(row.dataset.id));
+    remove.addEventListener("keydown", (e) => {
+      if (e.key === "Delete") {
+        e.preventDefault();
+        this._removeEntity(row.dataset.id);
+      }
+    });
+    row.appendChild(remove);
+    return row;
+  }
+
+  /**
+   * Handle a chosen row's picker changing: clear removes it, an unused device swaps in, a duplicate is undone.
+   */
+  _changeChosen(row, next, picker) {
+    const current = row.dataset.id;
+    if (next === current) return;
+    if (!next) {
+      this._removeEntity(current);
+      return;
+    }
+    if (this._entityIds.includes(next)) {
+      picker.value = current;
+      return;
+    }
+    this._entityIds = this._entityIds.map((id) => (id === current ? next : id));
+    row.dataset.id = next;
+    this._syncSelectionControls();
+    this._updateButtons();
+  }
+
+  /**
+   * Add one device to the end of the selection, ignoring duplicates and anything past the cap.
+   */
+  _addEntity(id) {
+    if (!id || this._entityIds.includes(id) || this._entityIds.length >= MAX_ENTITIES) return;
+    this._entityIds = [...this._entityIds, id];
+    this._els.chosenList.appendChild(this._createRow(id));
+    this._syncSelectionControls();
+    this._updateButtons();
+    if (this._entityIds.length >= MAX_ENTITIES) this._focusRemoveButton(MAX_ENTITIES - 1);
+  }
+
+  /**
+   * Remove one device from the selection and move focus to a control that is still there.
+   */
+  _removeEntity(id) {
+    const index = this._entityIds.indexOf(id);
+    if (index === -1) return;
+    this._entityIds = this._entityIds.filter((other) => other !== id);
+    for (const row of this._els.chosenList.querySelectorAll(".chosen-row")) {
+      if (row.dataset.id === id) row.remove();
+    }
+    this._syncSelectionControls();
+    this._updateButtons();
+    if (!this._focusRemoveButton(index)) this._focusAddControl();
+  }
+
+  /**
+   * Focus the add control, or the field title when the control cannot take focus.
+   */
+  _focusAddControl() {
+    const add = this._addControl();
+    add?.focus?.();
+    const active = this.shadowRoot.activeElement;
+    if (add && active && (active === add || add.contains(active))) return;
+    this._els.entityTitle.focus();
+  }
+
+  /**
+   * Focus the remove button at an index, or the last one; returns false when there is none.
+   */
+  _focusRemoveButton(index) {
+    const buttons = this._els.chosenList.querySelectorAll("button.remove");
+    const target = buttons[Math.min(index, buttons.length - 1)];
+    if (!target) return false;
+    target.focus();
+    return true;
+  }
+
+  /**
+   * Update labels, exclusions, help text and visibility to match the current selection.
+   */
+  _syncSelectionControls() {
+    const ids = this._entityIds;
+    const full = ids.length >= MAX_ENTITIES;
+    this._els.chosenList.hidden = ids.length === 0;
+    this._els.entityControl.hidden = full;
+    const helpText = full ? ENTITY_HELP_FULL : ENTITY_HELP;
+    if (this._els.entityHelp.textContent !== helpText) this._els.entityHelp.textContent = helpText;
+
+    if (this._controlMode === "picker") {
+      const add = this._addControl();
+      if (add) {
+        this._configurePicker(add, ids.length ? "Add another device or sensor" : "Add a device or sensor", ids);
+      }
+      this._els.chosenList.querySelectorAll(".chosen-row").forEach((row, index) => {
+        const picker = row.querySelector("ha-entity-picker");
+        if (!picker) return;
+        this._configurePicker(
+          picker,
+          `Device or sensor ${index + 1}`,
+          ids.filter((id) => id !== row.dataset.id)
+        );
+      });
+    } else {
+      this._populateFallbackOptions();
+    }
+    this._els.chosenList.querySelectorAll(".chosen-row").forEach((row) => {
+      const label = this._choiceLabel(row.dataset.id);
+      const remove = row.querySelector("button.remove");
+      const removeLabel = `Remove ${label}`;
+      if (remove.getAttribute("aria-label") !== removeLabel) remove.setAttribute("aria-label", removeLabel);
+      const name = row.querySelector(".chosen-name");
+      if (name && name.textContent !== label) name.textContent = label;
+    });
+  }
+
+  /**
+   * Set a picker's label and excluded devices, touching the element only when either has changed.
+   */
+  _configurePicker(picker, label, excluded) {
+    if (picker.label !== label) picker.label = label;
+    const signature = excluded.join(",");
+    if (this._pickerExclusions.get(picker) === signature) return;
+    this._pickerExclusions.set(picker, signature);
+    picker.excludeEntities = [...excluded];
+  }
+
+  /**
+   * Fill the fallback datalist with every device not yet chosen, using friendly names.
+   */
   _populateFallbackOptions() {
     const list = this._els.entityControl.querySelector("#entity-options");
     if (!list) return;
     const states = this._hass.states || {};
     const ids = Object.keys(states).sort();
-    // Only rebuild when the count changes, to avoid clobbering on every tick.
-    if (this._fallbackMap && list.childElementCount === ids.length) return;
+    // Only rebuild when the device count or the chosen devices change, to avoid clobbering on every tick.
+    const signature = `${ids.length}|${this._entityIds.join(",")}`;
+    if (this._fallbackMap && this._fallbackSignature === signature) return;
+    this._fallbackSignature = signature;
 
     // Show friendly names; only fall back to the raw id to disambiguate
     // genuinely duplicate names. Keep a display -> id map for resolution.
@@ -437,12 +680,16 @@ class ActivityExporterPanel extends HTMLElement {
       const name = states[id]?.attributes?.friendly_name || id;
       nameCounts[name] = (nameCounts[name] || 0) + 1;
     }
+    const chosen = new Set(this._entityIds);
     this._fallbackMap = new Map();
+    this._fallbackDisplay = new Map();
     list.innerHTML = "";
     for (const id of ids) {
       const friendly = states[id]?.attributes?.friendly_name || id;
       const display = nameCounts[friendly] > 1 ? `${friendly} (${id})` : friendly;
       this._fallbackMap.set(display, id);
+      this._fallbackDisplay.set(id, display);
+      if (chosen.has(id)) continue;
       const opt = document.createElement("option");
       opt.value = display;
       list.appendChild(opt);
@@ -486,7 +733,7 @@ class ActivityExporterPanel extends HTMLElement {
   // --- Buttons / status ---------------------------------------------------
 
   _updateButtons() {
-    const hasEntity = !!this._entityId;
+    const hasEntity = this._entityIds.length > 0;
     const ready = hasEntity && this._rangeValid() && !this._busy;
     this._els.csvBtn.disabled = !ready;
     this._els.jsonBtn.disabled = !ready;
@@ -541,17 +788,21 @@ class ActivityExporterPanel extends HTMLElement {
 
   // --- Export -------------------------------------------------------------
 
+  /**
+   * Fetch the history for the chosen devices and download it as a CSV or JSON file.
+   */
   async _export(format) {
-    if (this._busy || !this._entityId || !this._rangeValid()) return;
+    if (this._busy || !this._entityIds.length || !this._rangeValid()) return;
+    const entityIds = [...this._entityIds];
     const { startMs, endMs } = this._computeRange();
 
     this._busy = true;
     this._updateButtons();
     this._hideStatus();
 
-    let records;
+    let recordsById;
     try {
-      records = await this._loadRecords(startMs, endMs);
+      recordsById = await this._loadRecords(entityIds, startMs, endMs);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error("Activity Exporter: history request failed", err);
@@ -569,49 +820,60 @@ class ActivityExporterPanel extends HTMLElement {
     this._busy = false;
     this._updateButtons();
 
-    if (!records.length) {
+    const many = entityIds.length > 1;
+    const hasRows = entityIds.some((id) => (recordsById.get(id) || []).length > 0);
+    if (!hasRows) {
       this._showStatus(
         "empty",
-        "We couldn't find any history for this device or sensor in the time period you chose. Try a longer time period — some devices don't keep a long history."
+        many
+          ? "We couldn't find any history for these devices or sensors in the time period you chose. Try a longer time period. Some devices don't keep a long history."
+          : "We couldn't find any history for this device or sensor in the time period you chose. Try a longer time period — some devices don't keep a long history."
       );
       return;
     }
 
-    const finalRecords = this._skipRepeats ? filterRepeats(records) : records;
+    const states = this._hass.states;
+    const groups = buildExportGroups(entityIds, recordsById, states, this._skipRepeats);
+    const rowCount = groups.reduce((total, group) => total + group.records.length, 0);
     const timeZone = this._hass.config?.time_zone;
-    const friendlyName = this._hass.states[this._entityId]?.attributes?.friendly_name || null;
+    const meta = {
+      exportedAtMs: Date.now(),
+      periodStartMs: startMs,
+      periodEndMs: endMs,
+      stateChangesOnly: this._skipRepeats,
+    };
+    const csvOptions = { splitColumns: this._splitColumns, userNames: userNamesFromStates(states) };
 
     let content;
     let mime;
     let ext;
     if (format === "csv") {
-      content = toCsv(finalRecords, timeZone, {
-        splitColumns: this._splitColumns,
-        userNames: userNamesFromStates(this._hass.states),
-      });
+      content = many
+        ? toMultiCsv(groups, timeZone, csvOptions)
+        : toCsv(groups[0].records, timeZone, csvOptions);
       mime = "text/csv;charset=utf-8";
       ext = "csv";
     } else {
-      content = toJson(
-        {
-          entityId: this._entityId,
-          friendlyName,
-          exportedAtMs: Date.now(),
-          periodStartMs: startMs,
-          periodEndMs: endMs,
-          stateChangesOnly: this._skipRepeats,
-        },
-        finalRecords,
-        timeZone
-      );
+      content = many
+        ? toMultiJson(meta, groups, timeZone)
+        : toJson(
+            { ...meta, entityId: groups[0].entityId, friendlyName: groups[0].friendlyName },
+            groups[0].records,
+            timeZone
+          );
       mime = "application/json;charset=utf-8";
       ext = "json";
     }
 
-    const filename = buildFilename(this._entityId, startMs, endMs, ext, timeZone);
+    const filename = many
+      ? buildMultiFilename(entityIds.length, startMs, endMs, ext, timeZone)
+      : buildFilename(entityIds[0], startMs, endMs, ext, timeZone);
     this._downloadFile(filename, content, mime);
 
-    const kind = finalRecords.length > LARGE_RESULT_THRESHOLD ? "warn" : "success";
+    const kind = rowCount > LARGE_RESULT_THRESHOLD ? "warn" : "success";
+    const noHistory = describeMissingHistory(
+      groups.filter((group) => !group.records.length).map((group) => group.friendlyName || group.entityId)
+    );
     const noCauses = this._causesUnavailable
       ? " It doesn't say what caused each change, because that information wasn't available this time."
       : "";
@@ -621,34 +883,39 @@ class ActivityExporterPanel extends HTMLElement {
         : "";
     this._showStatus(
       kind,
-      `Downloaded ${finalRecords.length.toLocaleString()} row${finalRecords.length === 1 ? "" : "s"} as ${filename}.${big}${noCauses}`
+      `Downloaded ${rowCount.toLocaleString()} row${rowCount === 1 ? "" : "s"} as ${filename}.${noHistory ? ` ${noHistory}` : ""}${big}${noCauses}`
     );
   }
 
-  async _loadRecords(startMs, endMs) {
-    const key = `${this._entityId}|${startMs}|${endMs}`;
+  /**
+   * Fetch (or reuse) every chosen device's records for the range, resolving to a Map of id to records with causes attached.
+   */
+  async _loadRecords(entityIds, startMs, endMs) {
+    const key = buildCacheKey(entityIds, startMs, endMs);
     const startISO = new Date(startMs).toISOString();
     const endISO = new Date(endMs).toISOString();
     const chunks = chunkRangeByDay(startISO, endISO);
 
     if (this._cacheKey === key && this._cacheRecords) {
-      if (this._cacheCausesUnavailable) await this._retryCauses(chunks);
-      this._causesUnavailable = this._cacheCausesUnavailable;
-      return this._cacheRecords;
+      const cached = this._cacheRecords;
+      const retrying = this._cacheCausesUnavailable;
+      const records = retrying ? await this._retryCauses(key, chunks, cached) : cached;
+      this._causesUnavailable = retrying && records === cached;
+      return records;
     }
 
     this._setProgress(0, "Gathering history… 0%");
-    let collected = [];
-    let entries = [];
+    const collected = new Map(entityIds.map((id) => [id, []]));
+    const entries = new Map(entityIds.map((id) => [id, []]));
     let causesAvailable = true;
     for (let i = 0; i < chunks.length; i++) {
       // Causes are optional: the first failed logbook request turns them off for this export.
-      const logbookRequest = causesAvailable ? this._requestLogbook(chunks[i]) : null;
+      const logbookRequest = causesAvailable ? this._requestLogbook(entityIds, chunks[i]) : null;
       const result = await this._hass.callWS({
         type: "history/history_during_period",
         start_time: chunks[i].start,
         end_time: chunks[i].end,
-        entity_ids: [this._entityId],
+        entity_ids: entityIds,
         // Only the first chunk seeds the starting value; later chunks must not
         // re-emit the carried-over value or we'd get duplicate boundary rows.
         include_start_time_state: i === 0,
@@ -656,21 +923,27 @@ class ActivityExporterPanel extends HTMLElement {
         minimal_response: false,
         no_attributes: false,
       });
-      collected = collected.concat(parseHistoryRecords(result, this._entityId));
+      for (const id of entityIds) {
+        collected.set(id, collected.get(id).concat(parseHistoryRecords(result, id)));
+      }
       if (logbookRequest) {
         const logbook = await logbookRequest;
         if (logbook === null) {
           causesAvailable = false;
-          entries = [];
+          for (const id of entityIds) entries.set(id, []);
         } else {
-          entries = entries.concat(parseLogbookEntries(logbook, this._entityId));
+          for (const id of entityIds) {
+            entries.set(id, entries.get(id).concat(parseLogbookEntries(logbook, id)));
+          }
         }
       }
       const percent = Math.round(((i + 1) / chunks.length) * 100);
       this._setProgress(percent, `Gathering history… ${percent}%`);
     }
 
-    const records = attachCauses(normaliseRecords(collected), entries);
+    const records = new Map(
+      entityIds.map((id) => [id, attachCauses(normaliseRecords(collected.get(id)), entries.get(id))])
+    );
     this._causesUnavailable = !causesAvailable;
     this._cacheKey = key;
     this._cacheRecords = records;
@@ -679,31 +952,38 @@ class ActivityExporterPanel extends HTMLElement {
   }
 
   /**
-   * Request one chunk's logbook entries, resolving to null when the request fails.
+   * Request one chunk's logbook entries for several devices, resolving to null when the request fails.
    */
-  _requestLogbook(chunk) {
+  _requestLogbook(entityIds, chunk) {
     return this._hass
       .callWS({
         type: "logbook/get_events",
         start_time: chunk.start,
         end_time: chunk.end,
-        entity_ids: [this._entityId],
+        entity_ids: entityIds,
       })
       .catch(() => null);
   }
 
   /**
-   * Fetch the logbook again for cached records that are missing their causes, and attach them if every chunk succeeds.
+   * Fetch the logbook again for the given records and return them with causes attached, or the same records if any chunk fails.
    */
-  async _retryCauses(chunks) {
-    let entries = [];
+  async _retryCauses(key, chunks, cached) {
+    const entityIds = [...cached.keys()];
+    const entries = new Map(entityIds.map((id) => [id, []]));
     for (const chunk of chunks) {
-      const logbook = await this._requestLogbook(chunk);
-      if (logbook === null) return;
-      entries = entries.concat(parseLogbookEntries(logbook, this._entityId));
+      const logbook = await this._requestLogbook(entityIds, chunk);
+      if (logbook === null) return cached;
+      for (const id of entityIds) {
+        entries.set(id, entries.get(id).concat(parseLogbookEntries(logbook, id)));
+      }
     }
-    this._cacheRecords = attachCauses(this._cacheRecords, entries);
-    this._cacheCausesUnavailable = false;
+    const records = new Map(entityIds.map((id) => [id, attachCauses(cached.get(id), entries.get(id))]));
+    if (this._cacheKey === key) {
+      this._cacheRecords = records;
+      this._cacheCausesUnavailable = false;
+    }
+    return records;
   }
 
   _downloadFile(filename, content, mime) {
