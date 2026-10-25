@@ -46,6 +46,7 @@ settings get their own columns.
 | CSV formula guard | Numbers (`-3.5`) are left alone; only non-numeric text starting `= + - @` (tab/CR) is prefixed. | Keeps numeric columns numeric while keeping the spreadsheet-injection guard. |
 | JSON | Unchanged keys plus: `entity` block `{entity_id, friendly_name, domain, capabilities}` (capabilities = the metadata attributes of the most recent row); per record `derived: {state_changed, seconds_since_previous, brightness_percent?}` and `cause` (see below). `attributes` stays faithful and complete. | Briefing R1 + R3, domain-agnostic. |
 | What caused it (R4) | Fetch `logbook/get_events` (`start_time`, `end_time`, `entity_ids`) per day-chunk alongside history. Match an entry to the row whose `lu` equals the entry's `when` (±1 ms) and whose value matches. CSV gets `changed_by` (the triggering script/automation id with its name, else `domain.action`, else the user id); JSON gets `cause` with the raw `context_*` fields. If the logbook is not available, the export still succeeds without it. | Answers "which script did this". **Limitation:** the logbook only records value changes, so settings-only rows (brightness and colour steps) carry no cause; sensors with a unit are not in the logbook at all. |
+| Start-of-period row (1.1.1) | JSON records gain `last_changed` (from `lc`, else the row's own time). The first row, when it is HA's start-time state (`lu` equals the period start, no `lc`), gets `last_changed: null`, `derived.state_changed: null` and `derived.start_of_period: true`. Both CSV headers stay unchanged. | HA's start-state query selects literal 0 for both timestamps, so the value's real change time is never sent; stamping it as a change at the period start was a false claim. A later settings-only row's `lc` can reach back before the period and answer "on since when". |
 | Sibling entities (R4 optional) | **Not built.** | Breaks the single-device model; the briefing allows skipping. |
 
 ## Architecture
@@ -96,4 +97,4 @@ Feature branches, each reviewed (`/code-review high --fix`) and merged:
 2. `feature/change-causes`, logbook enrichment (`changed_by` / `cause`), docs.
 3. `feature/panel-polish`, fixes from a Hallmark audit of the panel.
 
-Then version 1.1.0, tag `v1.1.0` and a GitHub release.
+Then version 1.1.0, tag `1.1.0` and a GitHub release.

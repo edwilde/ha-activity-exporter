@@ -450,6 +450,7 @@ test("buildJsonPayload: self-describing wrapper shape (machine schema keeps HA n
   assert.equal(payload.period.end, "2026-01-16T00:00:00+00:00");
   assert.deepEqual(payload.records[0], {
     timestamp: "2026-01-15T01:00:00+00:00",
+    last_changed: "2026-01-15T01:00:00+00:00",
     state: "on",
     attributes: { device_class: "door" },
     derived: { state_changed: true, seconds_since_previous: null },
@@ -889,7 +890,7 @@ const JSON_META = {
   entityId: "light.bedside",
   friendlyName: "Bedside",
   exportedAtMs: (BASE + 3600) * 1000,
-  periodStartMs: BASE * 1000,
+  periodStartMs: (BASE - 600) * 1000,
   periodEndMs: (BASE + 3600) * 1000,
   stateChangesOnly: false,
 };
@@ -955,6 +956,73 @@ test("buildJsonPayload: brightness_percent is only present for a numeric brightn
   assert.deepEqual(derived[1], { state_changed: true, seconds_since_previous: 1 });
   assert.deepEqual(derived[2], { state_changed: true, seconds_since_previous: 1, brightness_percent: 0 });
   assert.deepEqual(derived[3], { state_changed: true, seconds_since_previous: 1 });
+});
+
+// Checks last_changed is the row's own time for a value change and the earlier lc for a settings-only step.
+test("buildJsonPayload: each record carries last_changed from lc", () => {
+  const records = buildJsonPayload(JSON_META, bedsideRecords(), "UTC").records;
+  assert.deepEqual(
+    records.map((r) => [r.timestamp, r.last_changed]),
+    [
+      ["2026-01-15T00:00:00+00:00", "2026-01-15T00:00:00+00:00"],
+      ["2026-01-15T00:00:30+00:00", "2026-01-15T00:00:00+00:00"],
+      ["2026-01-15T00:01:00+00:00", "2026-01-15T00:00:00+00:00"],
+    ]
+  );
+});
+
+// Checks the value carried in at the period start is marked, with no claimed change time,
+// while the next settings-only step still shows when the value really changed.
+test("buildJsonPayload: the start-of-period row has no last_changed and is marked start_of_period", () => {
+  const records = recordsFrom([
+    { s: "on", lu: BASE, a: { brightness: 26 } },
+    { s: "on", lu: BASE + 30, lc: BASE - 86400, a: { brightness: 51 } },
+  ]);
+  const payload = buildJsonPayload({ ...JSON_META, periodStartMs: BASE * 1000 }, records, "UTC");
+  assert.equal(payload.records[0].last_changed, null);
+  assert.deepEqual(payload.records[0].derived, {
+    state_changed: null,
+    start_of_period: true,
+    seconds_since_previous: null,
+    brightness_percent: 10.2,
+  });
+  assert.equal(payload.records[1].last_changed, "2026-01-14T00:00:00+00:00");
+  assert.deepEqual(payload.records[1].derived, { state_changed: false, seconds_since_previous: 30, brightness_percent: 20 });
+});
+
+// Checks a first row recorded after the period start is an ordinary change.
+test("buildJsonPayload: a first row after the period start is not marked start_of_period", () => {
+  const records = recordsFrom([{ s: "on", lu: BASE + 1, a: {} }]);
+  const payload = buildJsonPayload({ ...JSON_META, periodStartMs: BASE * 1000 }, records, "UTC");
+  assert.equal(payload.records[0].last_changed, "2026-01-15T00:00:01+00:00");
+  assert.deepEqual(payload.records[0].derived, { state_changed: true, seconds_since_previous: null });
+});
+
+// Checks a settings-only step recorded exactly at the period start keeps its lc and is not marked.
+test("buildJsonPayload: a settings-only row at the period start is not marked start_of_period", () => {
+  const records = recordsFrom([{ s: "on", lu: BASE, lc: BASE - 60, a: {} }]);
+  const payload = buildJsonPayload({ ...JSON_META, periodStartMs: BASE * 1000 }, records, "UTC");
+  assert.equal(payload.records[0].last_changed, "2026-01-14T23:59:00+00:00");
+  assert.deepEqual(payload.records[0].derived, { state_changed: false, seconds_since_previous: null });
+});
+
+// Checks only the first row can be the start-of-period row.
+test("buildJsonPayload: a later row at the period start time is not marked start_of_period", () => {
+  const records = recordsFrom([
+    { s: "off", lu: BASE - 10, a: {} },
+    { s: "on", lu: BASE, a: {} },
+  ]);
+  const payload = buildJsonPayload({ ...JSON_META, periodStartMs: BASE * 1000 }, records, "UTC");
+  assert.deepEqual(payload.records[1].derived, { state_changed: true, seconds_since_previous: 10 });
+  assert.equal(payload.records[1].last_changed, "2026-01-15T00:00:00+00:00");
+});
+
+// Checks a record with no change time is treated as changed at its own timestamp in both fields.
+test("buildJsonPayload: a record without lastChangedMs reports state_changed true and last_changed as its timestamp", () => {
+  const records = [{ timestampMs: BASE * 1000, state: "on", attributes: {} }];
+  const payload = buildJsonPayload(JSON_META, records, "UTC");
+  assert.equal(payload.records[0].last_changed, "2026-01-15T00:00:00+00:00");
+  assert.equal(payload.records[0].derived.state_changed, true);
 });
 
 // Checks toJson passes the new blocks through.

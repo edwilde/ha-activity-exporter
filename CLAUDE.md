@@ -13,7 +13,8 @@ own column by default (`timestamp,value,seconds_since_previous,<settings>,detail
 
 Design docs: `docs/plans/2026-05-31-ha-activity-exporter-design.md`, then
 `docs/plans/2026-10-25-settings-detail-export-design.md` (settings columns, which supersedes parts of it)
-Plan + built-vs-intended notes: `.ai/implementation-plans/ha-activity-exporter.md`
+Plans + built-vs-intended notes: `.ai/implementation-plans/ha-activity-exporter.md`,
+then `.ai/implementation-plans/2026-10-25-settings-detail-export.md`
 
 ## Architecture (one sentence)
 
@@ -69,6 +70,11 @@ custom_components/ha_activity_exporter/
   present); `lc` is the earlier moment the value last changed, so a settings-only
   row (brightness step, colour step) has `lc` < `lu`. Fetch per day-chunk with
   `include_start_time_state` only on the first chunk to avoid duplicate boundary rows.
+- The start-time state row (from `include_start_time_state`) has `lu` = the
+  requested start time and **no `lc`**: `_stmt_and_join_attributes_for_start_state`
+  selects literal 0 for both timestamps. Its real `last_changed` is not available
+  from `history_during_period`, so the JSON marks that first row
+  `start_of_period: true` with `last_changed: null` instead of claiming a change.
 - `single_config_entry: true` in the manifest makes core handle single-instance
   (aborts the second flow, hides "Add") — no manual guard needed.
 - **manifest.json keys must be ordered `domain, name, then alphabetical`** or

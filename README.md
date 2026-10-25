@@ -94,6 +94,7 @@ When Home Assistant knows what caused a change, the spreadsheet gains a `changed
   "records": [
     {
       "timestamp": "2026-05-30T06:30:00+12:00",
+      "last_changed": "2026-05-30T06:30:00+12:00",
       "state": "on",
       "attributes": {
         "friendly_name": "Bedroom Lamp",
@@ -115,6 +116,7 @@ When Home Assistant knows what caused a change, the spreadsheet gains a `changed
     },
     {
       "timestamp": "2026-05-30T06:30:30+12:00",
+      "last_changed": "2026-05-30T06:30:00+12:00",
       "state": "on",
       "attributes": {
         "friendly_name": "Bedroom Lamp",
@@ -137,6 +139,10 @@ When Home Assistant knows what caused a change, the spreadsheet gains a `changed
   ]
 }
 ```
+
+`last_changed` is when the value itself last changed, so on a row where only a setting changed it is earlier than `timestamp` (above, the lamp turned on at 06:30:00 and brightened at 06:30:30).
+
+The first row is usually the value at the start of the period, which Home Assistant stamps with the period's start time. It does not say when that value began, so in JSON that row has `last_changed: null` and `derived.start_of_period: true` (with `state_changed: null`). To find out how long the value had been in place, look at the next row where only a setting changed: its `last_changed` can reach back before the period. The spreadsheet shows the same first row at the period's start time, with no marker.
 
 `state_changes_only` is `true` when **Skip repeats** was on. With it on, `seconds_since_previous` is the time since the previous row in the file, so it spans any rows that were left out.
 
