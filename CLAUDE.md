@@ -87,6 +87,11 @@ custom_components/ha_activity_exporter/
   and registries from Lit context, so they only work as DOM descendants of HA's
   context provider. Both are lazy-loaded by HA pages and may be undefined when the
   panel renders, which is why the datalist fallback exists.
+- Since HA 2024.8 (core PR #121776) lights mark `brightness`, `color_mode`,
+  `color_temp(_kelvin)`, `effect` and `hs/rgb/rgbw/rgbww/xy_color` as unrecorded, so
+  `history_during_period` never returns them for a `light.*`. Settings-only rows still
+  arrive (each with a new `lu`) but carry none of those attributes. A template sensor
+  copying them is recorded normally (verified on 2026.10.4); the README documents it.
 - `single_config_entry: true` in the manifest makes core handle single-instance
   (aborts the second flow, hides "Add") — no manual guard needed.
 - **manifest.json keys must be ordered `domain, name, then alphabetical`** or

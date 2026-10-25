@@ -15,7 +15,7 @@ Home Assistant so you can open it in a spreadsheet or hand it to an AI for analy
 
 - 🔎 **Pick a device or sensor** with a searchable selector, or add up to 20 to export them together in one file.
 - 🗓️ **Choose a time period** — quick buttons (last 24 hours / 7 days / 30 days) or your own start and end dates.
-- 🎚️ **Every setting in its own column** - brightness, colour, temperature, position and more each get a column in the spreadsheet, and every recorded step is included, so you can see exactly what a device did and when.
+- 🎚️ **Every setting in its own column** - temperature, position, mode and more each get a column in the spreadsheet, and every recorded step is included, so you can see exactly what a device did and when. (Lights need one extra step for brightness and colour, see [Lights: brightness and colour](#lights-brightness-and-colour).)
 - 🧹 **Skip repeats** - an optional switch that leaves out rows where neither the value nor any setting changed, so your file isn't full of noise.
 - 📊 **Download as a spreadsheet (CSV)** — opens in Excel, Numbers, or Google Sheets.
 - 🤖 **Download as a data file (JSON)** — self-describing, ideal for feeding to an LLM.
@@ -263,9 +263,29 @@ your browser, and downloads it directly. Nothing is sent anywhere else, and no e
 server endpoints are added. Large date ranges are fetched a day at a time so you get a
 real progress bar, and both requests carry all of the chosen devices for each day.
 
+## Lights: brightness and colour
+
+Since Home Assistant 2024.8, a light's brightness, colour mode, colour temperature, effect and colour values are **not saved to history** ([home-assistant/core#121776](https://github.com/home-assistant/core/pull/121776)). Only on and off are kept. An export of a light therefore shows a row for each step it took, but no brightness or colour on those rows, and with **Skip repeats** on those rows are left out because nothing recorded changed.
+
+To capture them, add a template sensor that copies the light's settings. Its value and attributes are saved like any other sensor's:
+
+```yaml
+template:
+  - sensor:
+      - name: "Bedroom lamp settings"
+        unique_id: bedroom_lamp_settings
+        state: "{{ state_attr('light.bedroom_lamp', 'brightness') | int(0) }}"
+        attributes:
+          color_mode: "{{ state_attr('light.bedroom_lamp', 'color_mode') }}"
+          color_temp_kelvin: "{{ state_attr('light.bedroom_lamp', 'color_temp_kelvin') }}"
+          hs_color: "{{ state_attr('light.bedroom_lamp', 'hs_color') }}"
+```
+
+From then on, export the light and its settings sensor together: the sensor's value is the brightness (0 to 255) and its `hs_color` becomes `hue` and `saturation` columns. It only covers changes made after the sensor was added.
+
 ## Limitations
 
-- Only covers history that Home Assistant has actually recorded. If a thing is
+- Only covers history that Home Assistant has actually recorded (see [Lights: brightness and colour](#lights-brightness-and-colour)). If a thing is
   excluded from recording, or the range predates your retention period, there will be
   nothing to export.
 - The whole result is assembled in your browser, so extremely long ranges of a very
