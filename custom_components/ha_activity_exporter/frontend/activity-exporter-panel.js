@@ -45,7 +45,7 @@ const LARGE_RESULT_THRESHOLD = 25000;
 const MAX_ENTITIES = 20;
 
 const ENTITY_HELP = "Pick one or more devices or sensors, like a light, thermostat or door.";
-const ENTITY_HELP_FULL = `You can export up to ${MAX_ENTITIES} at once.`;
+const ENTITY_HELP_FULL = `You can export up to ${MAX_ENTITIES} at once. Take one off the list to add another.`;
 
 const STYLES = `
   :host {
