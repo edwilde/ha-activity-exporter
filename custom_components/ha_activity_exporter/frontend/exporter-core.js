@@ -608,6 +608,47 @@ export function buildMultiFilename(count, startMs, endMs, ext, timeZone) {
   return `${base}.${ext}`;
 }
 
+/** Build the cache key for a fetch: the sorted ids, then the range, so selection order does not matter. */
+export function buildCacheKey(entityIds, startMs, endMs) {
+  return `${[...entityIds].sort().join(",")}|${startMs}|${endMs}`;
+}
+
+/**
+ * Build one group per selected device, in selection order, with Skip repeats
+ * applied to each device's own records.
+ *
+ * @param {string[]} entityIds in selection order
+ * @param {Map<string, object[]>} recordsById normalised records per device
+ * @param {Record<string, {attributes?: Record<string, any>}>} [states] used for friendly names
+ * @param {boolean} [skipRepeats]
+ * @returns {{entityId: string, friendlyName: string|null, records: object[]}[]}
+ */
+export function buildExportGroups(entityIds, recordsById, states, skipRepeats = false) {
+  return entityIds.map((entityId) => {
+    const records = recordsById.get(entityId) || [];
+    return {
+      entityId,
+      friendlyName: states?.[entityId]?.attributes?.friendly_name || null,
+      records: skipRepeats ? filterRepeats(records) : records,
+    };
+  });
+}
+
+/**
+ * Say which devices have no history in the period, in plain language.
+ *
+ * @param {string[]} names display names of the devices with no rows
+ * @returns {string} empty when every device has rows
+ */
+export function describeMissingHistory(names) {
+  if (!names.length) return "";
+  const list =
+    names.length === 1
+      ? names[0]
+      : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+  return `No history for ${list} in this period.`;
+}
+
 /** Matches text that is a plain number, so a spreadsheet keeps it numeric. */
 const NUMERIC_TEXT = /^-?\d+(\.\d+)?(e[+-]?\d+)?$/i;
 

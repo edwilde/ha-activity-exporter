@@ -2,9 +2,9 @@
  * Activity Exporter sidebar panel.
  *
  * A self-contained vanilla web component (no build step, no external/CDN
- * dependencies). It reads a single entity's history over the authenticated
- * Home Assistant WebSocket connection, builds a CSV or JSON file in the
- * browser, and downloads it. All formatting logic lives in exporter-core.js so
+ * dependencies). It reads the history of one or more devices over the
+ * authenticated Home Assistant WebSocket connection, builds a CSV or JSON file
+ * in the browser, and downloads it. All formatting logic lives in exporter-core.js so
  * it can be unit-tested without a DOM.
  *
  * Audience note: this UI is for people who do NOT know Home Assistant
@@ -14,15 +14,20 @@
 
 import {
   attachCauses,
+  buildCacheKey,
+  buildExportGroups,
   buildFilename,
+  buildMultiFilename,
   chunkRangeByDay,
   computeRange,
-  filterRepeats,
+  describeMissingHistory,
   normaliseRecords,
   parseHistoryRecords,
   parseLogbookEntries,
   toCsv,
   toJson,
+  toMultiCsv,
+  toMultiJson,
   userNamesFromStates,
 } from "./exporter-core.js";
 
@@ -209,8 +214,9 @@ class ActivityExporterPanel extends HTMLElement {
     this._skipRepeats = false;
     this._splitColumns = true;
 
-    // Cache of raw (unfiltered) records keyed by entity+range, so switching
-    // format or toggling "skip repeats" or "own column" never refetches.
+    // Cache of raw (unfiltered) records per device, keyed by the sorted device
+    // ids and the range, so switching format, order, "skip repeats" or "own
+    // column" never refetches.
     this._cacheKey = null;
     this._cacheRecords = null;
     this._cacheCausesUnavailable = false;
@@ -755,16 +761,16 @@ class ActivityExporterPanel extends HTMLElement {
 
   async _export(format) {
     if (this._busy || !this._entityIds.length || !this._rangeValid()) return;
-    const entityId = this._entityIds[0];
+    const entityIds = [...this._entityIds];
     const { startMs, endMs } = this._computeRange();
 
     this._busy = true;
     this._updateButtons();
     this._hideStatus();
 
-    let records;
+    let recordsById;
     try {
-      records = await this._loadRecords(entityId, startMs, endMs);
+      recordsById = await this._loadRecords(entityIds, startMs, endMs);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error("Activity Exporter: history request failed", err);
@@ -782,49 +788,60 @@ class ActivityExporterPanel extends HTMLElement {
     this._busy = false;
     this._updateButtons();
 
-    if (!records.length) {
+    const many = entityIds.length > 1;
+    const hasRows = entityIds.some((id) => (recordsById.get(id) || []).length > 0);
+    if (!hasRows) {
       this._showStatus(
         "empty",
-        "We couldn't find any history for this device or sensor in the time period you chose. Try a longer time period — some devices don't keep a long history."
+        many
+          ? "We couldn't find any history for these devices or sensors in the time period you chose. Try a longer time period, some devices don't keep a long history."
+          : "We couldn't find any history for this device or sensor in the time period you chose. Try a longer time period — some devices don't keep a long history."
       );
       return;
     }
 
-    const finalRecords = this._skipRepeats ? filterRepeats(records) : records;
+    const states = this._hass.states;
+    const groups = buildExportGroups(entityIds, recordsById, states, this._skipRepeats);
+    const rowCount = groups.reduce((total, group) => total + group.records.length, 0);
     const timeZone = this._hass.config?.time_zone;
-    const friendlyName = this._hass.states[entityId]?.attributes?.friendly_name || null;
+    const meta = {
+      exportedAtMs: Date.now(),
+      periodStartMs: startMs,
+      periodEndMs: endMs,
+      stateChangesOnly: this._skipRepeats,
+    };
+    const csvOptions = { splitColumns: this._splitColumns, userNames: userNamesFromStates(states) };
 
     let content;
     let mime;
     let ext;
     if (format === "csv") {
-      content = toCsv(finalRecords, timeZone, {
-        splitColumns: this._splitColumns,
-        userNames: userNamesFromStates(this._hass.states),
-      });
+      content = many
+        ? toMultiCsv(groups, timeZone, csvOptions)
+        : toCsv(groups[0].records, timeZone, csvOptions);
       mime = "text/csv;charset=utf-8";
       ext = "csv";
     } else {
-      content = toJson(
-        {
-          entityId,
-          friendlyName,
-          exportedAtMs: Date.now(),
-          periodStartMs: startMs,
-          periodEndMs: endMs,
-          stateChangesOnly: this._skipRepeats,
-        },
-        finalRecords,
-        timeZone
-      );
+      content = many
+        ? toMultiJson(meta, groups, timeZone)
+        : toJson(
+            { ...meta, entityId: groups[0].entityId, friendlyName: groups[0].friendlyName },
+            groups[0].records,
+            timeZone
+          );
       mime = "application/json;charset=utf-8";
       ext = "json";
     }
 
-    const filename = buildFilename(entityId, startMs, endMs, ext, timeZone);
+    const filename = many
+      ? buildMultiFilename(entityIds.length, startMs, endMs, ext, timeZone)
+      : buildFilename(entityIds[0], startMs, endMs, ext, timeZone);
     this._downloadFile(filename, content, mime);
 
-    const kind = finalRecords.length > LARGE_RESULT_THRESHOLD ? "warn" : "success";
+    const kind = rowCount > LARGE_RESULT_THRESHOLD ? "warn" : "success";
+    const noHistory = describeMissingHistory(
+      groups.filter((group) => !group.records.length).map((group) => group.friendlyName || group.entityId)
+    );
     const noCauses = this._causesUnavailable
       ? " It doesn't say what caused each change, because that information wasn't available this time."
       : "";
@@ -834,34 +851,37 @@ class ActivityExporterPanel extends HTMLElement {
         : "";
     this._showStatus(
       kind,
-      `Downloaded ${finalRecords.length.toLocaleString()} row${finalRecords.length === 1 ? "" : "s"} as ${filename}.${big}${noCauses}`
+      `Downloaded ${rowCount.toLocaleString()} row${rowCount === 1 ? "" : "s"} as ${filename}.${noHistory ? ` ${noHistory}` : ""}${big}${noCauses}`
     );
   }
 
-  async _loadRecords(entityId, startMs, endMs) {
-    const key = `${entityId}|${startMs}|${endMs}`;
+  /**
+   * Fetch (or reuse) every chosen device's records for the range, resolving to a Map of id to records with causes attached.
+   */
+  async _loadRecords(entityIds, startMs, endMs) {
+    const key = buildCacheKey(entityIds, startMs, endMs);
     const startISO = new Date(startMs).toISOString();
     const endISO = new Date(endMs).toISOString();
     const chunks = chunkRangeByDay(startISO, endISO);
 
     if (this._cacheKey === key && this._cacheRecords) {
-      if (this._cacheCausesUnavailable) await this._retryCauses(entityId, chunks);
+      if (this._cacheCausesUnavailable) await this._retryCauses(chunks);
       this._causesUnavailable = this._cacheCausesUnavailable;
       return this._cacheRecords;
     }
 
     this._setProgress(0, "Gathering history… 0%");
-    let collected = [];
-    let entries = [];
+    const collected = new Map(entityIds.map((id) => [id, []]));
+    const entries = new Map(entityIds.map((id) => [id, []]));
     let causesAvailable = true;
     for (let i = 0; i < chunks.length; i++) {
       // Causes are optional: the first failed logbook request turns them off for this export.
-      const logbookRequest = causesAvailable ? this._requestLogbook(entityId, chunks[i]) : null;
+      const logbookRequest = causesAvailable ? this._requestLogbook(entityIds, chunks[i]) : null;
       const result = await this._hass.callWS({
         type: "history/history_during_period",
         start_time: chunks[i].start,
         end_time: chunks[i].end,
-        entity_ids: [entityId],
+        entity_ids: entityIds,
         // Only the first chunk seeds the starting value; later chunks must not
         // re-emit the carried-over value or we'd get duplicate boundary rows.
         include_start_time_state: i === 0,
@@ -869,21 +889,27 @@ class ActivityExporterPanel extends HTMLElement {
         minimal_response: false,
         no_attributes: false,
       });
-      collected = collected.concat(parseHistoryRecords(result, entityId));
+      for (const id of entityIds) {
+        collected.set(id, collected.get(id).concat(parseHistoryRecords(result, id)));
+      }
       if (logbookRequest) {
         const logbook = await logbookRequest;
         if (logbook === null) {
           causesAvailable = false;
-          entries = [];
+          for (const id of entityIds) entries.set(id, []);
         } else {
-          entries = entries.concat(parseLogbookEntries(logbook, entityId));
+          for (const id of entityIds) {
+            entries.set(id, entries.get(id).concat(parseLogbookEntries(logbook, id)));
+          }
         }
       }
       const percent = Math.round(((i + 1) / chunks.length) * 100);
       this._setProgress(percent, `Gathering history… ${percent}%`);
     }
 
-    const records = attachCauses(normaliseRecords(collected), entries);
+    const records = new Map(
+      entityIds.map((id) => [id, attachCauses(normaliseRecords(collected.get(id)), entries.get(id))])
+    );
     this._causesUnavailable = !causesAvailable;
     this._cacheKey = key;
     this._cacheRecords = records;
@@ -892,30 +918,35 @@ class ActivityExporterPanel extends HTMLElement {
   }
 
   /**
-   * Request one chunk's logbook entries, resolving to null when the request fails.
+   * Request one chunk's logbook entries for several devices, resolving to null when the request fails.
    */
-  _requestLogbook(entityId, chunk) {
+  _requestLogbook(entityIds, chunk) {
     return this._hass
       .callWS({
         type: "logbook/get_events",
         start_time: chunk.start,
         end_time: chunk.end,
-        entity_ids: [entityId],
+        entity_ids: entityIds,
       })
       .catch(() => null);
   }
 
   /**
-   * Fetch the logbook again for cached records that are missing their causes, and attach them if every chunk succeeds.
+   * Fetch the logbook again for the cached devices that are missing their causes, and attach them if every chunk succeeds.
    */
-  async _retryCauses(entityId, chunks) {
-    let entries = [];
+  async _retryCauses(chunks) {
+    const entityIds = [...this._cacheRecords.keys()];
+    const entries = new Map(entityIds.map((id) => [id, []]));
     for (const chunk of chunks) {
-      const logbook = await this._requestLogbook(entityId, chunk);
+      const logbook = await this._requestLogbook(entityIds, chunk);
       if (logbook === null) return;
-      entries = entries.concat(parseLogbookEntries(logbook, entityId));
+      for (const id of entityIds) {
+        entries.set(id, entries.get(id).concat(parseLogbookEntries(logbook, id)));
+      }
     }
-    this._cacheRecords = attachCauses(this._cacheRecords, entries);
+    this._cacheRecords = new Map(
+      entityIds.map((id) => [id, attachCauses(this._cacheRecords.get(id), entries.get(id))])
+    );
     this._cacheCausesUnavailable = false;
   }
 
