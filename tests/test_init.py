@@ -11,6 +11,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.ha_activity_exporter import async_setup_entry
 from custom_components.ha_activity_exporter.const import DOMAIN, PANEL_URL_PATH
 
 
@@ -44,13 +45,12 @@ async def test_setup_registers_panel_and_unload_removes_it(
 
 
 async def test_repeated_setup_keeps_single_panel(hass: HomeAssistant) -> None:
-    """A reload re-registers the panel without raising."""
+    """A second setup without an unload re-registers the panel without raising."""
     entry = await _setup_entry(hass)
 
-    # Re-running setup must not raise the "Overwriting panel" ValueError.
-    assert await hass.config_entries.async_reload(entry.entry_id)
+    # Must not raise the "Overwriting panel" ValueError.
+    assert await async_setup_entry(hass, entry) is True
     await hass.async_block_till_done()
-    assert entry.state is ConfigEntryState.LOADED
     assert PANEL_URL_PATH in hass.data.get(DATA_PANELS, {})
 
 

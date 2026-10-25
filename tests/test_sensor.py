@@ -1,6 +1,6 @@
 """Tests for the hidden mirror sensors that save attributes the recorder drops."""
 
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
@@ -184,3 +184,16 @@ async def test_changing_options_adds_a_mirror_for_a_new_source(
     fan = hass.states.get("sensor.activity_exporter_fan_desk")
     assert fan.attributes["percentage"] == 50
     assert set(entry.runtime_data) == {LAMP, "fan.desk"}
+
+
+async def test_unloading_the_entry_removes_the_mirrors(hass: HomeAssistant) -> None:
+    """Unloading the entry takes its mirror sensors offline."""
+    _set_lamp(hass, brightness=1)
+    entry = await _setup(hass)
+    assert hass.states.get(MIRROR).state == "on"
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert hass.states.get(MIRROR).state == STATE_UNAVAILABLE
+    assert entry.state is ConfigEntryState.NOT_LOADED
