@@ -7,6 +7,8 @@ import {
   buildFilename,
   buildColumns,
   buildJsonPayload,
+  buildMultiFilename,
+  buildMultiJsonPayload,
   chunkRangeByDay,
   computeRange,
   describeCause,
@@ -23,6 +25,7 @@ import {
   toCsv,
   toJson,
   toMultiCsv,
+  toMultiJson,
   userNamesFromStates,
   wallClockToEpochMs,
 } from "../../custom_components/ha_activity_exporter/frontend/exporter-core.js";
@@ -1531,5 +1534,88 @@ test("toMultiCsv: repeats are filtered per entity before the merge", () => {
       ["sensor.b", "off", "100"],
       ["sensor.a", "off", "120"],
     ]
+  );
+});
+
+// --- buildMultiJsonPayload / toMultiJson / buildMultiFilename -------------
+
+const MULTI_META = {
+  exportedAtMs: (M0 + 7200) * 1000,
+  periodStartMs: M0 * 1000,
+  periodEndMs: (M0 + 3600) * 1000,
+  stateChangesOnly: true,
+};
+
+// Checks the wrapper lists entities in selection order with shared period and totals.
+test("buildMultiJsonPayload: wraps entities in selection order with shared period and totals", () => {
+  const payload = buildMultiJsonPayload(MULTI_META, multiGroups(), "UTC");
+  assert.deepEqual(Object.keys(payload), [
+    "exported_at",
+    "period",
+    "state_changes_only",
+    "entity_count",
+    "record_count",
+    "entities",
+  ]);
+  assert.equal(payload.exported_at, "2026-01-15T02:00:00+00:00");
+  assert.deepEqual(payload.period, { start: "2026-01-15T00:00:00+00:00", end: "2026-01-15T01:00:00+00:00" });
+  assert.equal(payload.state_changes_only, true);
+  assert.equal(payload.entity_count, 3);
+  assert.equal(payload.record_count, 6);
+  assert.deepEqual(payload.entities.map((e) => e.entity_id), MULTI_IDS);
+  assert.deepEqual(Object.keys(payload.entities[0]), ["entity_id", "friendly_name", "entity", "record_count", "records"]);
+});
+
+// Checks each entity block matches an independently built single-entity payload.
+test("buildMultiJsonPayload: each entity block deep-equals buildJsonPayload for that entity minus the shared keys", () => {
+  const groups = multiGroups();
+  const payload = buildMultiJsonPayload(MULTI_META, groups, "UTC");
+  groups.forEach((group, i) => {
+    const expected = buildJsonPayload({ ...MULTI_META, entityId: group.entityId, friendlyName: group.friendlyName }, group.records, "UTC");
+    delete expected.exported_at;
+    delete expected.period;
+    delete expected.state_changes_only;
+    assert.deepEqual(payload.entities[i], expected);
+  });
+});
+
+// Checks the start-of-period marker is decided per entity, not on the merged list.
+test("buildMultiJsonPayload: start_of_period is marked per entity", () => {
+  const payload = buildMultiJsonPayload(MULTI_META, multiGroups(), "UTC");
+  const first = (id) => payload.entities.find((e) => e.entity_id === id).records[0];
+  assert.equal(first("light.bedside").derived.start_of_period, true);
+  assert.equal(first("light.hall").derived.start_of_period, true);
+  assert.equal("start_of_period" in first("climate.lounge").derived, false);
+  assert.equal(first("light.hall").last_changed, null);
+  assert.equal(first("climate.lounge").last_changed, "2026-01-15T00:00:30+00:00");
+});
+
+// Checks an entity asked for with no rows is still listed.
+test("buildMultiJsonPayload: an entity with no records is listed with record_count 0", () => {
+  const groups = multiGroups();
+  groups[1] = { ...groups[1], records: [] };
+  const payload = buildMultiJsonPayload(MULTI_META, groups, "UTC");
+  assert.equal(payload.entity_count, 3);
+  assert.equal(payload.record_count, 4);
+  assert.equal(payload.entities[1].entity_id, "light.hall");
+  assert.equal(payload.entities[1].record_count, 0);
+  assert.deepEqual(payload.entities[1].records, []);
+});
+
+// Checks toMultiJson prints the payload with two-space indentation.
+test("toMultiJson: pretty-prints the payload with two spaces", () => {
+  const groups = multiGroups();
+  const text = toMultiJson(MULTI_META, groups, "UTC");
+  assert.equal(text, JSON.stringify(buildMultiJsonPayload(MULTI_META, groups, "UTC"), null, 2));
+  assert.equal(text.split("\n")[1], '  "exported_at": "2026-01-15T02:00:00+00:00",');
+});
+
+// Checks the multi filename carries the count and the date range.
+test("buildMultiFilename: 3 items and the date range", () => {
+  const start = Date.UTC(2026, 0, 15, 0, 0, 0);
+  const end = Date.UTC(2026, 0, 16, 0, 0, 0);
+  assert.equal(
+    buildMultiFilename(3, start, end, "json", "UTC"),
+    "activity-export_3-items_2026-01-15_2026-01-16.json"
   );
 });

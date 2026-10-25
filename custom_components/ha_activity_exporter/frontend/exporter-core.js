@@ -599,6 +599,15 @@ export function buildFilename(entityId, startMs, endMs, ext, timeZone) {
   return `${base}.${ext}`;
 }
 
+/** Build the multi-device download filename: activity-export_{N}-items_{startDate}_{endDate}.{ext} */
+export function buildMultiFilename(count, startMs, endMs, ext, timeZone) {
+  const base = `activity-export_${count}-items_${formatDateForFilename(
+    startMs,
+    timeZone
+  )}_${formatDateForFilename(endMs, timeZone)}`;
+  return `${base}.${ext}`;
+}
+
 /** Matches text that is a plain number, so a spreadsheet keeps it numeric. */
 const NUMERIC_TEXT = /^-?\d+(\.\d+)?(e[+-]?\d+)?$/i;
 
@@ -878,4 +887,45 @@ export function buildJsonPayload(meta, records, timeZone) {
 /** Build pretty-printed JSON text. */
 export function toJson(meta, records, timeZone) {
   return JSON.stringify(buildJsonPayload(meta, records, timeZone), null, 2);
+}
+
+/**
+ * Build the multi-device JSON payload: shared period and totals, then one block
+ * per device in the order given, each built by buildJsonPayload.
+ *
+ * @param {{exportedAtMs:number, periodStartMs:number, periodEndMs:number,
+ *          stateChangesOnly:boolean}} meta
+ * @param {{entityId:string, friendlyName?:string, records:object[]}[]} groups
+ * @param {string} [timeZone]
+ */
+export function buildMultiJsonPayload(meta, groups, timeZone) {
+  const entities = groups.map((group) => {
+    const {
+      exported_at: _exportedAt,
+      period: _period,
+      state_changes_only: _stateChangesOnly,
+      ...block
+    } = buildJsonPayload(
+      { ...meta, entityId: group.entityId, friendlyName: group.friendlyName },
+      group.records,
+      timeZone
+    );
+    return block;
+  });
+  return {
+    exported_at: formatTimestamp(meta.exportedAtMs, timeZone),
+    period: {
+      start: formatTimestamp(meta.periodStartMs, timeZone),
+      end: formatTimestamp(meta.periodEndMs, timeZone),
+    },
+    state_changes_only: !!meta.stateChangesOnly,
+    entity_count: groups.length,
+    record_count: groups.reduce((total, group) => total + group.records.length, 0),
+    entities,
+  };
+}
+
+/** Build pretty-printed multi-device JSON text. */
+export function toMultiJson(meta, groups, timeZone) {
+  return JSON.stringify(buildMultiJsonPayload(meta, groups, timeZone), null, 2);
 }
