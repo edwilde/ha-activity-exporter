@@ -699,19 +699,38 @@ function latestCapabilities(records) {
 }
 
 /**
+ * Whether a record is the value Home Assistant carried in at the period start
+ * (stamped with the start time and no change time) rather than a recorded change.
+ *
+ * @param {{timestampMs:number, lastChangedMs?:number}[]} records oldest-first
+ * @param {number} index position of the record
+ * @param {number} periodStartMs
+ * @returns {boolean}
+ */
+function isStartOfPeriod(records, index, periodStartMs) {
+  const r = records[index];
+  return (
+    index === 0 &&
+    Math.abs(r.timestampMs - periodStartMs) < 1 &&
+    (r.lastChangedMs ?? r.timestampMs) === r.timestampMs
+  );
+}
+
+/**
  * Compute the values derived for one record: whether its value changed, the
  * gap since the previous record, and brightness as a percentage when known.
  *
  * @param {{timestampMs:number, lastChangedMs?:number, attributes:object}[]} records oldest-first
  * @param {number} index position of the record
- * @returns {{state_changed: boolean, seconds_since_previous: number|null, brightness_percent?: number}}
+ * @param {boolean} startOfPeriod whether the record is the value at the period start
+ * @returns {{state_changed: boolean|null, start_of_period?: true, seconds_since_previous: number|null, brightness_percent?: number}}
  */
-function deriveValues(records, index) {
+function deriveValues(records, index, startOfPeriod) {
   const r = records[index];
-  const derived = {
-    state_changed: r.lastChangedMs === r.timestampMs,
-    seconds_since_previous: secondsSincePrevious(records, index),
-  };
+  const derived = startOfPeriod
+    ? { state_changed: null, start_of_period: true }
+    : { state_changed: r.lastChangedMs === r.timestampMs };
+  derived.seconds_since_previous = secondsSincePrevious(records, index);
   const percent = brightnessPercent((r.attributes || {}).brightness);
   if (percent !== null) derived.brightness_percent = percent;
   return derived;
@@ -745,13 +764,17 @@ export function buildJsonPayload(meta, records, timeZone) {
     },
     state_changes_only: !!meta.stateChangesOnly,
     record_count: records.length,
-    records: records.map((r, index) => ({
-      timestamp: formatTimestamp(r.timestampMs, timeZone),
-      state: r.state,
-      attributes: r.attributes || {},
-      derived: deriveValues(records, index),
-      ...(r.cause ? { cause: r.cause } : {}),
-    })),
+    records: records.map((r, index) => {
+      const startOfPeriod = isStartOfPeriod(records, index, meta.periodStartMs);
+      return {
+        timestamp: formatTimestamp(r.timestampMs, timeZone),
+        last_changed: startOfPeriod ? null : formatTimestamp(r.lastChangedMs ?? r.timestampMs, timeZone),
+        state: r.state,
+        attributes: r.attributes || {},
+        derived: deriveValues(records, index, startOfPeriod),
+        ...(r.cause ? { cause: r.cause } : {}),
+      };
+    }),
   };
 }
 
