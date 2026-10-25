@@ -1679,6 +1679,16 @@ test("buildCacheKey: saved-detail order and unrelated entries are ignored", () =
   );
 });
 
+// Checks the order the entries arrive in does not change the key.
+test("buildCacheKey: saved entries in a different order share one key", () => {
+  const a = savedEntry("light.a", "sensor.m_a", ["x"]);
+  const b = savedEntry("fan.b", "sensor.m_b", ["y"]);
+  assert.equal(
+    buildCacheKey(["light.a", "fan.b"], 1, 2, [a, b]),
+    buildCacheKey(["light.a", "fan.b"], 1, 2, [b, a])
+  );
+});
+
 // Checks a different mirror for the same details changes the key.
 test("buildCacheKey: a different mirror changes the key", () => {
   assert.notEqual(
