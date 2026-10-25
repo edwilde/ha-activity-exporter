@@ -332,10 +332,11 @@ function isScalar(value) {
  * Give a column name the attribute_ prefix when it matches a fixed column.
  *
  * @param {string} name
+ * @param {Set<string>} [fixed] the fixed column names to avoid
  * @returns {string}
  */
-function columnName(name) {
-  return FIXED_COLUMNS.has(name) ? `attribute_${name}` : name;
+function columnName(name, fixed = FIXED_COLUMNS) {
+  return fixed.has(name) ? `attribute_${name}` : name;
 }
 
 /**
@@ -355,14 +356,15 @@ function brightnessPercent(brightness) {
  *
  * @param {object} attributes
  * @param {Set<string>} metadata keys from metadataKeys()
+ * @param {Set<string>} [fixed] the fixed column names an attribute must not reuse
  * @returns {{cells: Record<string, any>, leftovers: Record<string, any>}}
  */
-export function flattenAttributes(attributes, metadata) {
+export function flattenAttributes(attributes, metadata, fixed = FIXED_COLUMNS) {
   const cells = {};
   const leftovers = {};
   for (const [key, value] of Object.entries(attributes || {})) {
     if (metadata.has(key) || value == null || TUPLE_NAMES.has(key)) continue;
-    const column = columnName(key);
+    const column = columnName(key, fixed);
     if (column in cells) leftovers[key] = value;
     else if (isScalar(value)) cells[column] = value;
     else if (Array.isArray(value) && value.every(isScalar)) cells[column] = JSON.stringify(value);
@@ -392,24 +394,36 @@ export function flattenAttributes(attributes, metadata) {
 }
 
 /**
+ * Order setting column names with light columns first and the rest alphabetically.
+ *
+ * @param {Iterable<string>} names
+ * @returns {string[]}
+ */
+function orderColumns(names) {
+  const present = new Set(names);
+  const light = LIGHT_COLUMNS.filter((name) => present.has(name));
+  const rest = [...present].filter((name) => !LIGHT_COLUMNS.includes(name)).sort();
+  return [...light, ...rest];
+}
+
+/**
  * List the attribute columns that hold a value in at least one record, light
  * columns first and the rest alphabetically.
  *
  * @param {{attributes: object}[]} records
  * @param {Set<string>} metadata keys from metadataKeys()
+ * @param {Set<string>} [fixed] the fixed column names an attribute must not reuse
  * @returns {string[]}
  */
-export function buildColumns(records, metadata) {
+export function buildColumns(records, metadata, fixed = FIXED_COLUMNS) {
   const present = new Set();
   for (const r of records) {
-    const { cells } = flattenAttributes(r.attributes, metadata);
+    const { cells } = flattenAttributes(r.attributes, metadata, fixed);
     for (const [name, value] of Object.entries(cells)) {
       if (value !== "") present.add(name);
     }
   }
-  const light = LIGHT_COLUMNS.filter((name) => present.has(name));
-  const rest = [...present].filter((name) => !LIGHT_COLUMNS.includes(name)).sort();
-  return [...light, ...rest];
+  return orderColumns(present);
 }
 
 // --- causes ---------------------------------------------------------------
@@ -666,6 +680,78 @@ export function toCsv(records, timeZone, { splitColumns = true, userNames } = {}
         .join(",")
     );
   });
+  return lines.join("\r\n");
+}
+
+/** Fixed columns of the multi-device split layout. */
+const MULTI_FIXED_COLUMNS = new Set([...FIXED_COLUMNS, "entity_id", "name"]);
+
+/**
+ * Build one CSV timeline for several devices, with entity_id and name columns,
+ * rows in time order and ties in the order the groups are given.
+ *
+ * @param {{entityId: string, friendlyName?: string, records: {timestampMs:number, state:string, attributes:object, cause?:object}[]}[]} groups
+ *   in selection order, each with oldest-first records already filtered as wanted
+ * @param {string} [timeZone]
+ * @param {{splitColumns?: boolean, userNames?: Record<string, string>}} [options]
+ */
+export function toMultiCsv(groups, timeZone, { splitColumns = true, userNames } = {}) {
+  const rows = groups.flatMap((group) =>
+    group.records.map((record, index) => ({ group, record, index }))
+  );
+  rows.sort((a, b) => a.record.timestampMs - b.record.timestampMs);
+  if (!splitColumns) {
+    const lines = ["entity_id,name,timestamp,value,details"];
+    for (const { group, record } of rows) {
+      lines.push(
+        [
+          csvEscape(group.entityId),
+          csvEscape(group.friendlyName),
+          csvEscape(formatTimestamp(record.timestampMs, timeZone)),
+          csvEscape(record.state),
+          csvEscape(JSON.stringify(record.attributes || {})),
+        ].join(",")
+      );
+    }
+    return lines.join("\r\n");
+  }
+  const metadata = new Map(groups.map((group) => [group, metadataKeys(group.records)]));
+  const columns = orderColumns(
+    groups.flatMap((group) => buildColumns(group.records, metadata.get(group), MULTI_FIXED_COLUMNS))
+  );
+  const showCauses = rows.some(({ record }) => describeCause(record.cause, userNames) !== "");
+  const lines = [
+    [
+      "entity_id",
+      "name",
+      "timestamp",
+      "value",
+      "seconds_since_previous",
+      ...columns,
+      ...(showCauses ? ["changed_by"] : []),
+      "details",
+    ]
+      .map(csvEscape)
+      .join(","),
+  ];
+  for (const { group, record, index } of rows) {
+    const { cells, leftovers } = flattenAttributes(record.attributes, metadata.get(group), MULTI_FIXED_COLUMNS);
+    const details = Object.keys(leftovers).length ? JSON.stringify(leftovers) : "";
+    lines.push(
+      [
+        group.entityId,
+        group.friendlyName,
+        formatTimestamp(record.timestampMs, timeZone),
+        record.state,
+        secondsSincePrevious(group.records, index),
+        ...columns.map((name) => cells[name]),
+        ...(showCauses ? [describeCause(record.cause, userNames)] : []),
+        details,
+      ]
+        .map(csvEscape)
+        .join(",")
+    );
+  }
   return lines.join("\r\n");
 }
 
