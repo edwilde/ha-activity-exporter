@@ -107,6 +107,8 @@
   ];
 
   window.__calls = [];
+  window.__fail = params.get("fail");
+  window.__delay = Number(params.get("delay")) || 0;
   window.__exports = [];
   const realCreate = URL.createObjectURL;
   URL.createObjectURL = (blob) => { blob.text().then((t) => window.__exports.push(t)); return realCreate(blob); };
@@ -118,7 +120,8 @@
       window.__calls.push(msg);
       const start = Date.parse(msg.start_time) / 1000;
       const end = Date.parse(msg.end_time) / 1000;
-      if (params.get("fail") === msg.type) throw new Error("mock failure");
+      if (window.__delay) await new Promise((resolve) => setTimeout(resolve, window.__delay));
+      if (window.__fail === msg.type) throw new Error("mock failure");
       if (msg.type === "history/history_during_period") {
         const result = {};
         for (const id of msg.entity_ids) {

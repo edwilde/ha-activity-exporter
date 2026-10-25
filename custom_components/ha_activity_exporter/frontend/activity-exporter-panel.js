@@ -221,6 +221,7 @@ class ActivityExporterPanel extends HTMLElement {
     this._cacheRecords = null;
     this._cacheCausesUnavailable = false;
     this._causesUnavailable = false;
+    this._pickerExclusions = new WeakMap();
 
     this._busy = false;
   }
@@ -426,9 +427,9 @@ class ActivityExporterPanel extends HTMLElement {
     if (mode === "fallback") {
       this._populateFallbackOptions();
     } else {
-      this._addControl().hass = this._hass;
-      for (const picker of this._els.chosenList.querySelectorAll("ha-entity-picker")) {
-        picker.hass = this._hass;
+      const pickers = [this._addControl(), ...this._els.chosenList.querySelectorAll("ha-entity-picker")];
+      for (const picker of pickers) {
+        if (picker.hass !== this._hass) picker.hass = this._hass;
       }
     }
     if (modeChanged) this._renderChosen();
@@ -612,14 +613,16 @@ class ActivityExporterPanel extends HTMLElement {
     if (this._controlMode === "picker") {
       const add = this._addControl();
       if (add) {
-        add.excludeEntities = [...ids];
-        add.label = ids.length ? "Add another device or sensor" : "What do you want to export?";
+        this._configurePicker(add, ids.length ? "Add another device or sensor" : "Add a device or sensor", ids);
       }
       this._els.chosenList.querySelectorAll(".chosen-row").forEach((row, index) => {
         const picker = row.querySelector("ha-entity-picker");
         if (!picker) return;
-        picker.label = `Device or sensor ${index + 1}`;
-        picker.excludeEntities = ids.filter((id) => id !== row.dataset.id);
+        this._configurePicker(
+          picker,
+          `Device or sensor ${index + 1}`,
+          ids.filter((id) => id !== row.dataset.id)
+        );
       });
     } else {
       this._populateFallbackOptions();
@@ -630,6 +633,17 @@ class ActivityExporterPanel extends HTMLElement {
       const name = row.querySelector(".chosen-name");
       if (name) name.textContent = label;
     });
+  }
+
+  /**
+   * Set a picker's label and excluded devices, touching the element only when either has changed.
+   */
+  _configurePicker(picker, label, excluded) {
+    if (picker.label !== label) picker.label = label;
+    const signature = excluded.join(",");
+    if (this._pickerExclusions.get(picker) === signature) return;
+    this._pickerExclusions.set(picker, signature);
+    picker.excludeEntities = [...excluded];
   }
 
   /**
@@ -760,6 +774,9 @@ class ActivityExporterPanel extends HTMLElement {
 
   // --- Export -------------------------------------------------------------
 
+  /**
+   * Fetch the history for the chosen devices and download it as a CSV or JSON file.
+   */
   async _export(format) {
     if (this._busy || !this._entityIds.length || !this._rangeValid()) return;
     const entityIds = [...this._entityIds];
@@ -795,7 +812,7 @@ class ActivityExporterPanel extends HTMLElement {
       this._showStatus(
         "empty",
         many
-          ? "We couldn't find any history for these devices or sensors in the time period you chose. Try a longer time period, some devices don't keep a long history."
+          ? "We couldn't find any history for these devices or sensors in the time period you chose. Try a longer time period. Some devices don't keep a long history."
           : "We couldn't find any history for this device or sensor in the time period you chose. Try a longer time period — some devices don't keep a long history."
       );
       return;
@@ -866,9 +883,11 @@ class ActivityExporterPanel extends HTMLElement {
     const chunks = chunkRangeByDay(startISO, endISO);
 
     if (this._cacheKey === key && this._cacheRecords) {
-      if (this._cacheCausesUnavailable) await this._retryCauses(chunks);
-      this._causesUnavailable = this._cacheCausesUnavailable;
-      return this._cacheRecords;
+      const cached = this._cacheRecords;
+      const retrying = this._cacheCausesUnavailable;
+      const records = retrying ? await this._retryCauses(key, chunks, cached) : cached;
+      this._causesUnavailable = retrying && records === cached;
+      return records;
     }
 
     this._setProgress(0, "Gathering history… 0%");
@@ -933,22 +952,24 @@ class ActivityExporterPanel extends HTMLElement {
   }
 
   /**
-   * Fetch the logbook again for the cached devices that are missing their causes, and attach them if every chunk succeeds.
+   * Fetch the logbook again for the given records and return them with causes attached, or the same records if any chunk fails.
    */
-  async _retryCauses(chunks) {
-    const entityIds = [...this._cacheRecords.keys()];
+  async _retryCauses(key, chunks, cached) {
+    const entityIds = [...cached.keys()];
     const entries = new Map(entityIds.map((id) => [id, []]));
     for (const chunk of chunks) {
       const logbook = await this._requestLogbook(entityIds, chunk);
-      if (logbook === null) return;
+      if (logbook === null) return cached;
       for (const id of entityIds) {
         entries.set(id, entries.get(id).concat(parseLogbookEntries(logbook, id)));
       }
     }
-    this._cacheRecords = new Map(
-      entityIds.map((id) => [id, attachCauses(this._cacheRecords.get(id), entries.get(id))])
-    );
-    this._cacheCausesUnavailable = false;
+    const records = new Map(entityIds.map((id) => [id, attachCauses(cached.get(id), entries.get(id))]));
+    if (this._cacheKey === key) {
+      this._cacheRecords = records;
+      this._cacheCausesUnavailable = false;
+    }
+    return records;
   }
 
   _downloadFile(filename, content, mime) {
