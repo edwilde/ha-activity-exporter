@@ -86,8 +86,10 @@ def mirror_attributes(
     }
     dropped: list[str] = []
     limit = MAX_RECORDED_ATTRS_BYTES - _HEADROOM_BYTES
+    sizes = {name: len(json_bytes(value)) for name, value in kept.items()}
     while kept and len(json_bytes(kept)) > limit:
-        largest = max(kept, key=lambda name: len(json_bytes(kept[name])))
+        largest = max(sizes, key=sizes.__getitem__)
+        del sizes[largest]
         dropped.append(largest)
         del kept[largest]
     return kept, dropped
