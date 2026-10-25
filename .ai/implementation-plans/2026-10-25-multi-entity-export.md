@@ -28,6 +28,7 @@
 ---
 
 ## Task 1: Multi-entity fixtures
+<!-- REVIEW: completed -->
 
 **Files:**
 - Modify: `tests/frontend/exporter-core.test.mjs` (new section at the end)
@@ -79,6 +80,7 @@ function multiGroups() {
 ---
 
 ## Task 2: `toMultiCsv`
+<!-- REVIEW: deviated (approved) -->
 
 **Files:**
 - Modify: `custom_components/ha_activity_exporter/frontend/exporter-core.js` (beside `toCsv`, `:617-670`; `columnName` `:337`; `buildColumns` `:402`)
@@ -112,7 +114,14 @@ function multiGroups() {
 
 ---
 
+> **Review [2026-10-25]:**
+> **Status:** Deviated (approved)
+> **What changed:** `toCsv` and `toMultiCsv` are thin wrappers over one internal `buildCsv` (exporter-core.js:695-709), so single-device output now passes through shared code instead of an untouched `toCsv`.
+> **Root cause:** `/code-review high --fix` flagged the two near-identical builders as drift-prone (also a Task 2 deferred minor). A seeded comparison of 24,000 outputs against the previous code (and the reviewer's own 4,000 against `main`) showed no byte differences, which is the guarantee the original "never reaches the new code" rule was there to protect.
+> **Decision:** Approved.
+
 ## Task 3: `buildMultiJsonPayload`, `toMultiJson`, `buildMultiFilename`
+<!-- REVIEW: completed -->
 
 **Files:**
 - Modify: `custom_components/ha_activity_exporter/frontend/exporter-core.js` (beside `buildJsonPayload` `:749`, `buildFilename` `:580`)
@@ -142,6 +151,7 @@ function multiGroups() {
 ---
 
 ## Task 4: Multi-select picker and selection state
+<!-- REVIEW: unplanned (approved) -->
 
 **Files:**
 - Modify: `custom_components/ha_activity_exporter/frontend/activity-exporter-panel.js` (`:171`, `:225-230`, `:370-465`, `:488-534`, `STYLES` `:40-160`)
@@ -164,7 +174,14 @@ function multiGroups() {
 
 ---
 
+> **Review [2026-10-25]:**
+> **Status:** Unplanned addition (approved)
+> **What was added:** The add picker is labelled "Add a device or sensor" / "Add another device or sensor" and each chosen row "Device or sensor N"; changing a chosen row's picker swaps that device in place and clearing it removes the row (`_changeChosen`); after the last device is removed, focus falls back to the field title (`tabindex="-1"`, `_focusAddControl`). Picker labels and exclusions are only rewritten when they change.
+> **Root cause:** The final review found the add picker repeated the visible title as its label, and that every HA state update re-rendered up to 21 Lit pickers. Testing in a real HA 2026.10.4 found the real `ha-entity-picker` cannot take focus (no own `focus()`, `delegatesFocus: false`), so removing the last device dropped focus to `<body>`; the harness stub had hidden this.
+> **Decision:** Approved.
+
 ## Task 5: Fetch, cache, causes and export for several entities
+<!-- REVIEW: deviated (approved); one finding skipped -->
 
 **Files:**
 - Modify: `custom_components/ha_activity_exporter/frontend/activity-exporter-panel.js` (`_export` `:545-626`, `_loadRecords` `:628-679`, `_requestLogbook` `:684-693`, `_retryCauses` `:698-707`)
@@ -188,7 +205,14 @@ function multiGroups() {
 
 ---
 
+> **Review [2026-10-25]:**
+> **Status:** Deviated (approved) and one finding skipped
+> **What changed:** The several-device empty message reads "...Try a longer time period. Some devices don't keep a long history." (full stop, not the planned comma). `describeMissingHistory` falls back to the raw entity id when a device has no friendly name.
+> **Root cause:** The planned wording was a comma splice (final review M1). The id fallback only applies to a device that has left `hass.states`, where the id is the only identifier left.
+> **Decision:** Wording approved; id fallback skipped (rare, noted here).
+
 ## Task 6: Docs, version, screenshot
+<!-- REVIEW: deviated (fixed before merge); unplanned (approved) -->
 
 **Files:**
 - Modify: `README.md` (formats section, Limitations `:152-160`, screenshot)
@@ -205,6 +229,12 @@ function multiGroups() {
 **Verify:** README excerpts equal the functions' output for the fixture; `node --test` and `pytest` pass; CI green on the branch.
 
 ---
+
+> **Review [2026-10-25]:**
+> **Status:** Deviated (fixed before merge) and unplanned addition (approved)
+> **What changed:** README gains a "Lights: brightness and colour" section with a template-sensor workaround, and CLAUDE.md gains facts on unrecorded light attributes and on `ha-entity-picker` having no `hass` property. The README examples that showed light brightness and colour were regenerated from recorded-style data (a thermostat and a light settings sensor), and the column-switch help became "Puts things like temperature, position and mode in separate spreadsheet columns. Turn off for a simpler file with fewer columns."
+> **Root cause:** Exporting from a real HA 2026.10.4 returned light rows with only `friendly_name`. Since HA 2024.8 (core PR #121776) lights mark `brightness`, `color_mode`, `color_temp(_kelvin)`, `effect` and the colour tuples as unrecorded, so `history_during_period` never returns them. A template sensor copying them is recorded normally (verified on 2026.10.4). The help text change came from a Task 4-5 review: "three-column" was wrong for several devices.
+> **Decision:** Approved; the contradicting examples were fixed before merge.
 
 ## Caveats & known risks
 
@@ -260,4 +290,36 @@ Checked against home-assistant/frontend `dev` (2026-10-24) and release 20260930.
 
 ## Review record
 
-(populated post-implementation by the `review-implementation` skill)
+**Reviewed:** 2026-10-25
+**Reviewer:** Claude (Opus subagent, fresh context)
+**Branch:** feature/multi-entity-export
+**Commit:** 1b8f233
+
+### Verification Results
+- **Tests:** `node --test tests/frontend/*.test.mjs` 134 pass, 0 fail; `pytest` 5 passed; GitHub Actions Validate green.
+- **Lint:** none configured.
+- **Mutation checks:** Task 2 17/17, Task 3 12/12, Tasks 4-5 core helpers 14/14 caught. Panel-only code was checked in the harness and in a real HA 2026.10.4 (Docker, localhost), not by mutation.
+
+### Triage Summary
+| # | Finding | Type | Decision |
+|---|---------|------|----------|
+| 1 | Single-device CSV runs through a shared builder | Deviation | Approved |
+| 2 | Docs on unrecorded light attributes and picker context | Unplanned | Approved |
+| 3 | README examples showed light brightness/colour HA never records | Deviation | Fixed before merge |
+| 4 | Raw entity id can appear in "No history for..." | Deviation | Skipped |
+| 5 | Several-device empty message uses a full stop | Deviation | Approved |
+| 6 | Picker labels, swappable rows, focus fallback | Unplanned | Approved |
+| 7 | Column-switch help reworded | Unplanned | Approved |
+
+### Technical Context & Learnings
+- Home Assistant has not recorded light `brightness`, `color_mode`, `color_temp(_kelvin)`, `effect` or `hs/rgb/rgbw/rgbww/xy_color` since 2024.8 (core PR #121776). A light export shows a row per step with none of those values; a template sensor copying them is recorded and exports with `hue`/`saturation` columns.
+- The real `ha-entity-picker` (HA 2026.10) works inside a `panel_custom` element through Lit context, honours `excludeEntities`, and fires `value-changed` with `""` when its own clear button is used. It cannot take focus via `focus()`.
+- A stub picker in the harness cannot prove focus or context behaviour; a disposable HA container (`ghcr.io/home-assistant/home-assistant:stable` on `127.0.0.1:8123`, onboarding via `/api/onboarding/*`) can, in a few minutes.
+- Preset ranges (last 24 hours/7/30 days) build their cache key from `Date.now()`, so switching CSV to JSON refetches; with 20 devices that is 20 times the data. Known and left as is: reusing a preset's result would make its end time stale.
+
+### Items Requiring Rework
+None.
+
+### Deferred/Skipped Items
+- Finding 4 (raw id in the no-history message) skipped.
+- Code review notes left as is: same-named devices get identical Remove labels in picker mode; a picker registering late rebuilds the fallback input mid-typing (as in 1.1.x); the field title's `<label for>` only associates with the fallback input.
