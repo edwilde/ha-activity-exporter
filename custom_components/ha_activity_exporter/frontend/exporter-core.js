@@ -699,6 +699,17 @@ function latestCapabilities(records) {
 }
 
 /**
+ * Give the moment a record's value last changed, which is its own timestamp
+ * when no separate change time is known.
+ *
+ * @param {{timestampMs:number, lastChangedMs?:number}} record
+ * @returns {number}
+ */
+function changedAtMs(record) {
+  return record.lastChangedMs ?? record.timestampMs;
+}
+
+/**
  * Whether a record is the value Home Assistant carried in at the period start
  * (stamped with the start time and no change time) rather than a recorded change.
  *
@@ -712,7 +723,7 @@ function isStartOfPeriod(records, index, periodStartMs) {
   return (
     index === 0 &&
     Math.abs(r.timestampMs - periodStartMs) < 1 &&
-    (r.lastChangedMs ?? r.timestampMs) === r.timestampMs
+    changedAtMs(r) === r.timestampMs
   );
 }
 
@@ -729,7 +740,7 @@ function deriveValues(records, index, startOfPeriod) {
   const r = records[index];
   const derived = startOfPeriod
     ? { state_changed: null, start_of_period: true }
-    : { state_changed: r.lastChangedMs === r.timestampMs };
+    : { state_changed: changedAtMs(r) === r.timestampMs };
   derived.seconds_since_previous = secondsSincePrevious(records, index);
   const percent = brightnessPercent((r.attributes || {}).brightness);
   if (percent !== null) derived.brightness_percent = percent;
@@ -768,7 +779,7 @@ export function buildJsonPayload(meta, records, timeZone) {
       const startOfPeriod = isStartOfPeriod(records, index, meta.periodStartMs);
       return {
         timestamp: formatTimestamp(r.timestampMs, timeZone),
-        last_changed: startOfPeriod ? null : formatTimestamp(r.lastChangedMs ?? r.timestampMs, timeZone),
+        last_changed: startOfPeriod ? null : formatTimestamp(changedAtMs(r), timeZone),
         state: r.state,
         attributes: r.attributes || {},
         derived: deriveValues(records, index, startOfPeriod),

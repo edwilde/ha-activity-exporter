@@ -1017,6 +1017,14 @@ test("buildJsonPayload: a later row at the period start time is not marked start
   assert.equal(payload.records[1].last_changed, "2026-01-15T00:00:00+00:00");
 });
 
+// Checks a record with no change time is treated as changed at its own timestamp in both fields.
+test("buildJsonPayload: a record without lastChangedMs reports state_changed true and last_changed as its timestamp", () => {
+  const records = [{ timestampMs: BASE * 1000, state: "on", attributes: {} }];
+  const payload = buildJsonPayload(JSON_META, records, "UTC");
+  assert.equal(payload.records[0].last_changed, "2026-01-15T00:00:00+00:00");
+  assert.equal(payload.records[0].derived.state_changed, true);
+});
+
 // Checks toJson passes the new blocks through.
 test("toJson: includes the entity block and derived values", () => {
   const parsed = JSON.parse(toJson(JSON_META, bedsideRecords(), "UTC"));
