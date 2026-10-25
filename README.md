@@ -281,13 +281,14 @@ The panel runs entirely in your browser, using your existing Home Assistant logi
 It reads history over Home Assistant's WebSocket API (`history/history_during_period`),
 asks the logbook (`logbook/get_events`) what caused each change, builds the file in
 your browser, and downloads it directly. Nothing is sent anywhere else, and no history
-endpoint is added. The only server-side parts are the hidden sensors for [Saving more detail](#saving-more-detail)
-and three small commands the panel uses to list, look up and choose what they keep. Large date ranges are fetched a day at a time so you get a
+endpoint is added. The only server-side parts are the hidden sensors for
+[Saving more detail](#saving-more-detail) and three small commands the panel uses to
+list, look up and choose what they keep. Large date ranges are fetched a day at a time so you get a
 real progress bar, and both requests carry all of the chosen devices for each day.
 
 ## Saving more detail
 
-Home Assistant leaves some details out of its history on purpose. A light's brightness and colour, a speaker's artwork, a heat pump's fan settings and many more are shown live but never saved ([home-assistant/core#121776](https://github.com/home-assistant/core/pull/121776) is the change for lights). An export of such a device shows a row for each step it took, but without those details, and with **Skip repeats** on those rows can drop out because nothing recorded changed.
+Home Assistant leaves some details out of its history on purpose. A light's brightness and colour, a speaker's list of inputs and sound modes, a heat pump's list of supported fan modes and many more are shown live but never saved ([home-assistant/core#121776](https://github.com/home-assistant/core/pull/121776) is the change for lights). An export of such a device shows a row for each step it took, but without those details, and with **Skip repeats** on those rows can drop out because nothing recorded changed.
 
 The **Save more detail** tab fixes that, with no configuration files:
 

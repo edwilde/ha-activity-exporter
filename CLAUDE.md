@@ -64,7 +64,9 @@ custom_components/ha_activity_exporter/
    static registration is not enough.
 3. **Keep the shared contract in `const.py` consistent** with the JS: domain
    `ha_activity_exporter`, panel served at `/ha_activity_exporter/...`, web
-   component tag `activity-exporter-panel`, sidebar path `activity-exporter`.
+   component tag `activity-exporter-panel`, sidebar path `activity-exporter`, and
+   the WebSocket commands `ha_activity_exporter/detail/list`, `.../describe` and
+   `.../save`.
 4. **Verify HA APIs against source before using them.** Real-HA testing is
    limited here; CI (hassfest + HACS + tests) is the gate.
 
@@ -131,9 +133,10 @@ python -m venv .venv && .venv/bin/pip install -r requirements_test.txt
 .venv/bin/pytest
 ```
 
-The `tests/test_init.py` suite calls `async_setup_entry`/`async_unload_entry`
-directly (only `http` set up) so it stays fast and does not depend on the heavy
-`frontend` component during unit tests.
+The `tests/test_init.py` suite sets the entry up through
+`hass.config_entries.async_setup` with the real dependency chain (`http`,
+`frontend`, `panel_custom`), so the panel and the sensor platform load as they do
+in Home Assistant.
 
 ## Gotchas
 
