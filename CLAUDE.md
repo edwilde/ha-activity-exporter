@@ -5,16 +5,21 @@ Guidance for Claude Code (and humans) working in this repo.
 ## What this is
 
 A HACS-distributed Home Assistant **custom integration** that adds one **sidebar
-panel** for exporting a single entity's history to **CSV** or **JSON**. The
+panel** for exporting the history of one entity, or up to 20 at once, to **CSV** or **JSON**. The
 primary consumer of the output is an LLM, so the data is dumped faithfully (with
 an optional "skip repeats" filter that keeps any row where the value or a
 setting changed), never aggregated or interpreted. The CSV gives each setting its
 own column by default (`timestamp,value,seconds_since_previous,<settings>,details`).
+Choosing several entities gives one timeline in one file: the CSV gains an
+`entity_id,name,` prefix, rows run in time order across entities and
+`seconds_since_previous` is per entity; the JSON wraps an `entities[]` list. One
+entity's output is unchanged.
 
 Design docs: `docs/plans/2026-05-31-ha-activity-exporter-design.md`, then
 `docs/plans/2026-10-25-settings-detail-export-design.md` (settings columns, which supersedes parts of it)
 Plans + built-vs-intended notes: `.ai/implementation-plans/ha-activity-exporter.md`,
-then `.ai/implementation-plans/2026-10-25-settings-detail-export.md`
+then `.ai/implementation-plans/2026-10-25-settings-detail-export.md`,
+then `.ai/implementation-plans/2026-10-25-multi-entity-export.md` (several-entity export)
 
 ## Architecture (one sentence)
 
@@ -39,7 +44,9 @@ custom_components/ha_activity_exporter/
 1. **Plain language, zero HA jargon in the UI.** The target audience does not
    know Home Assistant. Never expose "entity", "state", "recorder", or
    "significant changes" in visible copy. (The CSV header starts `timestamp,value`, and is
-   exactly `timestamp,value,details` when per-setting columns are off;
+   exactly `timestamp,value,details` when per-setting columns are off; with several entities
+   it starts `entity_id,name,timestamp,value` and is `entity_id,name,timestamp,value,details`
+   when per-setting columns are off;
    the JSON payload keeps faithful HA keys — `state`, `attributes` — as a stable
    machine schema for LLMs.)
 2. **No build step, no CDN/runtime deps in the frontend.** It must work on
