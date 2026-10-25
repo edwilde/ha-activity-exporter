@@ -57,9 +57,11 @@
     "sensor.outdoor_temperature": { state: "-3.5", attributes: { friendly_name: "Outdoor temperature", unit_of_measurement: "°C", device_class: "temperature", state_class: "measurement" } },
     "binary_sensor.front_door": { state: "off", attributes: { friendly_name: "Front door", device_class: "door" } },
     "light.hall": { state: "on", attributes: { friendly_name: "Hall light", supported_color_modes: ["brightness"], color_mode: "brightness", brightness: 200 } },
+    "sensor.chatty_meter": { state: "1", attributes: { friendly_name: "Chatty meter", unit_of_measurement: "W", state_class: "measurement" } },
     "sensor.garage_humidity": { state: "55", attributes: { friendly_name: "Garage humidity", unit_of_measurement: "%", device_class: "humidity", state_class: "measurement" } },
   };
   const manyCount = Number(params.get("many")) || 0;
+  const rowsEach = Number(params.get("rows")) || 50;
   for (let n = 1; n <= manyCount; n++) {
     states[`sensor.extra_${String(n).padStart(2, "0")}`] = { state: "1", attributes: { friendly_name: `Extra sensor ${n}`, unit_of_measurement: "W", state_class: "measurement" } };
   }
@@ -93,11 +95,12 @@
     "climate.lounge": [0, 1, 2, 3].map((k) => ({ s: "heat", a: { ...states["climate.lounge"].attributes, current_temperature: 16 + k, hvac_action: k < 3 ? "heating" : "idle" }, lu: now - 5000 + k * 900, ...(k ? { lc: now - 5000 } : {}) })),
     "sensor.outdoor_temperature": [0, 1, 2].map((k) => ({ s: String(-3.5 + k), a: states["sensor.outdoor_temperature"].attributes, lu: now - 4000 + k * 600 })),
     "binary_sensor.front_door": [0, 1].map((k) => ({ s: k ? "off" : "on", a: states["binary_sensor.front_door"].attributes, lu: now - 3000 + k * 60 })),
+    "sensor.chatty_meter": ["1", "1", "1", "2", "2", "3"].map((v, k) => ({ s: v, a: states["sensor.chatty_meter"].attributes, lu: now - 3500 + k * 300 })),
     "light.hall": [0, 1, 2].map((k) => ({ s: "on", a: { ...states["light.hall"].attributes, brightness: 100 + k * 50 }, lu: now - 4500 + k * 600, ...(k ? { lc: now - 4500 } : {}) })),
   };
   for (const id of Object.keys(states)) {
     if (!id.startsWith("sensor.extra_")) continue;
-    history[id] = Array.from({ length: 50 }, (_, k) => ({ s: String(k), a: states[id].attributes, lu: now - 80000 + k * 1500 }));
+    history[id] = Array.from({ length: rowsEach }, (_, k) => ({ s: String(k), a: states[id].attributes, lu: now - 80000 + k * (80000 / rowsEach) }));
   }
   const logbook = [
     { when: sunriseStart, state: "on", entity_id: "light.bedroom_kitty_bedside_light", context_event_type: "script_started", context_domain: "script", context_name: "Weekend sunrise", context_message: "started", context_entity_id: "script.weekend_sunrise" },
