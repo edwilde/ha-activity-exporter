@@ -1324,3 +1324,38 @@ test("buildJsonPayload: a matched record carries its raw cause and others carry 
   assert.equal("cause" in payload.records[1], false);
   assert.equal("cause" in payload.records[2], false);
 });
+
+// --- multi-entity ---------------------------------------------------------
+
+const M0 = 1768435200; // 2026-01-15T00:00:00Z
+
+/** Three entities' compressed rows as one history response. */
+function multiResponse() {
+  return {
+    "light.bedside": [
+      { s: "off", lu: M0, a: { friendly_name: "Bedside", supported_color_modes: ["hs"], color_mode: null, brightness: null } },
+      { s: "on", lu: M0 + 60, a: { friendly_name: "Bedside", supported_color_modes: ["hs"], color_mode: "hs", brightness: 26, hs_color: [30, 80] } },
+      { s: "on", lu: M0 + 90, lc: M0 + 60, a: { friendly_name: "Bedside", supported_color_modes: ["hs"], color_mode: "hs", brightness: 51, hs_color: [30, 70] } },
+    ],
+    "light.hall": [
+      { s: "on", lu: M0, a: { friendly_name: "Hall", supported_color_modes: ["color_temp"], color_mode: "color_temp", brightness: 255, color_temp_kelvin: 3000 } },
+      { s: "on", lu: M0 + 60, lc: M0 - 3600, a: { friendly_name: "Hall", supported_color_modes: ["color_temp"], color_mode: "color_temp", brightness: 128, color_temp_kelvin: 3000 } },
+    ],
+    "climate.lounge": [
+      { s: "heat", lu: M0 + 30, a: { friendly_name: "Lounge", hvac_modes: ["off", "heat"], current_temperature: -1.5, temperature: 21 } },
+    ],
+  };
+}
+
+const MULTI_IDS = ["light.bedside", "light.hall", "climate.lounge"];
+const MULTI_NAMES = { "light.bedside": "Bedside", "light.hall": "Hall", "climate.lounge": "Lounge" };
+
+/** The fixture as the groups the multi formatters take, in selection order. */
+function multiGroups() {
+  const response = multiResponse();
+  return MULTI_IDS.map((entityId) => ({
+    entityId,
+    friendlyName: MULTI_NAMES[entityId],
+    records: normaliseRecords(parseHistoryRecords(response, entityId)),
+  }));
+}
