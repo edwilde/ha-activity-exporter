@@ -151,4 +151,43 @@
 
 ## Review record
 
-(populated post-implementation by the `review-implementation` skill)
+**Reviewed:** 2026-10-26
+**Reviewer:** Claude (Opus subagent, fresh context), after `/code-review high --fix`
+**Branch:** feature/detail-recording
+
+### Verification results
+- **Tests:** pytest 81 passed; `node --test` 156 passed; `node --check` on the panel clean. No linter configured.
+
+### Triage summary
+
+The user was away; decisions below are the controller's recommendations, pending the user's confirmation.
+
+| # | Finding | Type | Decision |
+|---|---------|------|----------|
+| 1 | 255-char truncation dropped (Task 2) | Deviation | Approve: the state machine rejects states over 255 chars (`core.py:198-201`), so it could never run |
+| 2 | Options change updates mirrors in place (`_sync_mirrors`, `async_set_chosen`) instead of reloading the entry (Tasks 2-3) | Deviation | Approve: a reload re-registered the panel and refused saves sent during it (583a805) |
+| 3 | `detail/list` reads the entry loaded or not (Task 3) | Deviation | Approve: fixed an empty list during the old reload (68e1157); now only matters for an unloaded/disabled entry |
+| 4 | Design doc still described the reload | Missing | Fixed in this review (design doc architecture + decision 7) |
+| 5 | Admin export reuses the cached detail list | Deviation | Approve: refreshed on tab open and after every save; stale only if another admin edits concurrently |
+| 6 | Cache key includes each mirror's chosen details | Unplanned | Approve: otherwise a re-export after changing details reused the old merge |
+| 7 | Editor keeps saved details the thing lacks right now (`withSavedDetails`) | Unplanned | Approve: without it, saving while a light is off silently dropped brightness |
+| 8 | Stale-list note after a failed refresh | Unplanned | Approve (no automated test; panel DOM has no harness) |
+| 9 | Panel extras: arrow-key tabs, disabled Save when nothing ticked, Cancel, hidden Change for a missing source | Unplanned | Approve |
+| 10 | `save` adds `not_loaded` and validates with `cv.entity_id` | Unplanned | Approve |
+| 11 | Repeated-setup test passed while HA logged an error | Test issue | Fixed (af04803 and follow-up): real reload test plus a stale-panel test |
+| 12 | No test saved an untracked source; a registry check could not fail | Test issue | Fixed (af04803) |
+
+### Technical context & learnings
+- `State.state_info["unrecorded_attributes"]` is the per-entity source of truth for what the recorder drops; it is Python-only, so the panel needs a WS command to read it.
+- A mirror must write only on change and carry the source's `last_updated` timestamp: the mirror's own `last_updated` lags the source by milliseconds, so joining on timestamps picks the previous step.
+- Reloading a config entry that owns a sidebar panel re-registers the panel; update entities in place on options changes instead.
+- Removing an entity's registry entry removes the live entity too, so a later `async_remove(force_remove=True)` is a harmless no-op.
+
+### Items requiring rework
+None.
+
+### Deferred / skipped items
+- `detail/list` is readable by non-admins (deliberate: their exports need it).
+- Duplicated datalist builder in the panel (refactor).
+- A mirror whose registry entry is removed outside the panel stays gone until a restart.
+- The panel tab has not been exercised in a real Home Assistant or browser.

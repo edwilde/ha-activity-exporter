@@ -72,9 +72,10 @@ Rejected:
     A removed source writes `unavailable` with no details.
   - Value is the source's state string. `source_last_updated` lets the export join
     exactly, without guessing from timestamps that lag by a few milliseconds.
-- `__init__.py`: forwards to the `sensor` platform, adds an update listener that
-  reloads the entry when options change, and registers three WS commands once per
-  process:
+- `__init__.py`: forwards to the `sensor` platform and registers three WS commands
+  once per process. The sensor platform's options listener adds, removes and
+  updates mirrors in place when the tracked list changes, without reloading the
+  entry:
   - `ha_activity_exporter/detail/list` (any user): `[{source_entity_id,
     mirror_entity_id, attributes, dropped}]`. The export needs it, and non-admins can
     export.
@@ -154,6 +155,7 @@ The user was away and asked for best judgement. These were the choices:
 5. Over-cap details are dropped largest-first and reported, rather than losing all.
 6. Tab and save/describe are admin-only; the list is readable by all users so their
    exports include the details.
-7. Options change reloads the entry (simple and correct; a reload takes a moment).
+7. An options change updates mirrors in place rather than reloading the entry, so the
+   panel stays registered and back-to-back saves are never refused.
 8. Source rename is not followed: the mirror goes `unavailable` and the user re-adds.
 9. Version 1.3.0.
