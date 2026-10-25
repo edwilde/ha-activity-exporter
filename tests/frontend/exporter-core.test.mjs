@@ -33,6 +33,7 @@ import {
   toMultiJson,
   userNamesFromStates,
   wallClockToEpochMs,
+  withSavedDetails,
 } from "../../custom_components/ha_activity_exporter/frontend/exporter-core.js";
 
 // --- chunkRangeByDay ------------------------------------------------------
@@ -1645,6 +1646,47 @@ test("buildCacheKey: a different device set or range changes the key", () => {
   assert.notEqual(base, buildCacheKey(["a", "b"], 10, 21));
 });
 
+/** Build a detail list entry for a source with its mirror and saved details. */
+function savedEntry(source, mirror, attributes) {
+  return { source_entity_id: source, mirror_entity_id: mirror, attributes, dropped: [] };
+}
+
+// Checks changing which details are saved changes the key.
+test("buildCacheKey: a changed saved-detail list changes the key", () => {
+  const before = buildCacheKey(["light.a"], 1, 2, [savedEntry("light.a", "sensor.m_a", ["brightness"])]);
+  const after = buildCacheKey(["light.a"], 1, 2, [
+    savedEntry("light.a", "sensor.m_a", ["brightness", "color_mode"]),
+  ]);
+  assert.notEqual(before, after);
+  assert.notEqual(before, buildCacheKey(["light.a"], 1, 2, []));
+});
+
+// Checks the order of the saved list, and unchosen or mirror-less entries, do not matter.
+test("buildCacheKey: saved-detail order and unrelated entries are ignored", () => {
+  const base = buildCacheKey(["light.a"], 1, 2, [
+    savedEntry("light.a", "sensor.m_a", ["brightness", "color_mode"]),
+  ]);
+  assert.equal(
+    base,
+    buildCacheKey(["light.a"], 1, 2, [
+      savedEntry("light.a", "sensor.m_a", ["color_mode", "brightness"]),
+      savedEntry("fan.b", "sensor.m_b", ["speed"]),
+    ])
+  );
+  assert.equal(
+    buildCacheKey(["light.a"], 1, 2, [savedEntry("light.a", null, ["brightness"])]),
+    buildCacheKey(["light.a"], 1, 2)
+  );
+});
+
+// Checks a different mirror for the same details changes the key.
+test("buildCacheKey: a different mirror changes the key", () => {
+  assert.notEqual(
+    buildCacheKey(["light.a"], 1, 2, [savedEntry("light.a", "sensor.m1", ["x"])]),
+    buildCacheKey(["light.a"], 1, 2, [savedEntry("light.a", "sensor.m2", ["x"])])
+  );
+});
+
 /** Build a records Map from {id: [[state, seconds], ...]} using plain records. */
 function recordsMap(spec) {
   return new Map(
@@ -1878,4 +1920,22 @@ test("detailChoices: labels with spaces and notes volatile details", () => {
   assert.equal(steady.note, "");
   assert.equal(busy.label, "Media position");
   assert.equal(busy.note, "changes very often, uses more space");
+});
+
+// --- withSavedDetails ------------------------------------------------------
+
+// Checks a saved detail the thing lacks right now is offered again, ticked-ready.
+test("withSavedDetails: adds saved names the thing does not have right now", () => {
+  const present = [{ name: "color_mode", unrecorded: false, volatile: false }];
+  assert.deepEqual(withSavedDetails(present, ["brightness", "color_mode"]), [
+    ...present,
+    { name: "brightness", unrecorded: true, volatile: false },
+  ]);
+});
+
+// Checks nothing is duplicated or added when every saved name is already present.
+test("withSavedDetails: leaves the list alone when everything saved is present", () => {
+  const present = [{ name: "brightness", unrecorded: true, volatile: false }];
+  assert.deepEqual(withSavedDetails(present, ["brightness"]), present);
+  assert.deepEqual(withSavedDetails(present, []), present);
 });

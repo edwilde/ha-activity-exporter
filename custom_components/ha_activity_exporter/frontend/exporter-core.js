@@ -219,6 +219,23 @@ export function detailChoices(details) {
 }
 
 /**
+ * Add every saved detail the thing does not currently have to its list of
+ * details, so a detail that is missing right now (a light that is off has no
+ * brightness) is offered again and survives a save unless the user unticks it.
+ *
+ * @param {{name: string, unrecorded: boolean, volatile: boolean}[]} details
+ * @param {string[]} savedNames
+ * @returns {{name: string, unrecorded: boolean, volatile: boolean}[]}
+ */
+export function withSavedDetails(details, savedNames) {
+  const present = new Set(details.map((detail) => detail.name));
+  const absent = savedNames
+    .filter((name) => !present.has(name))
+    .map((name) => ({ name, unrecorded: true, volatile: false }));
+  return [...details, ...absent];
+}
+
+/**
  * Serialise a value to JSON text with object keys sorted at every depth, so two
  * values with the same content always give the same string.
  *
@@ -684,9 +701,24 @@ export function buildMultiFilename(count, startMs, endMs, ext, timeZone) {
   return `${base}.${ext}`;
 }
 
-/** Build the cache key for a fetch: the sorted ids, then the range, so selection order does not matter. */
-export function buildCacheKey(entityIds, startMs, endMs) {
-  return `${[...entityIds].sort().join(",")}|${startMs}|${endMs}`;
+/**
+ * Build the cache key for a fetch: the sorted ids, then the range, so selection
+ * order does not matter, then each chosen thing's saved-detail copy with its
+ * sorted list of saved details, so changing what is saved changes the key.
+ *
+ * @param {string[]} entityIds
+ * @param {number} startMs
+ * @param {number} endMs
+ * @param {{source_entity_id: string, mirror_entity_id: string|null, attributes: string[]}[]} [detailList]
+ * @returns {string}
+ */
+export function buildCacheKey(entityIds, startMs, endMs, detailList = []) {
+  const base = `${[...entityIds].sort().join(",")}|${startMs}|${endMs}`;
+  const saved = detailList
+    .filter((entry) => entry.mirror_entity_id && entityIds.includes(entry.source_entity_id))
+    .map((entry) => JSON.stringify([entry.mirror_entity_id, [...entry.attributes].sort()]))
+    .sort();
+  return saved.length ? `${base}|${saved.join(";")}` : base;
 }
 
 /**

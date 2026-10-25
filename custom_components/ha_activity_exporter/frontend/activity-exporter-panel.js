@@ -22,6 +22,7 @@ import {
   computeRange,
   describeMissingHistory,
   detailChoices,
+  withSavedDetails,
   mergeMirrorRecords,
   normaliseRecords,
   parseHistoryRecords,
@@ -46,6 +47,8 @@ const LARGE_RESULT_THRESHOLD = 25000;
 // The most devices or sensors one download can hold.
 const MAX_ENTITIES = 20;
 
+// Added to a success message when the saved list could not be reloaded afterwards.
+const STALE_LIST_NOTE = " The list below may be out of date - reopen this tab to refresh.";
 const WS_DETAIL_LIST = "ha_activity_exporter/detail/list";
 const WS_DETAIL_DESCRIBE = "ha_activity_exporter/detail/describe";
 const WS_DETAIL_SAVE = "ha_activity_exporter/detail/save";
@@ -270,6 +273,7 @@ class ActivityExporterPanel extends HTMLElement {
     this._tab = "export";
     this._detailList = [];
     this._detailListLoaded = false;
+    this._detailListFetched = false;
     this._detailTarget = null;
     this._describeCache = new Map();
   }
@@ -901,8 +905,10 @@ class ActivityExporterPanel extends HTMLElement {
     try {
       this._detailList = await this._listDetails();
     } catch {
+      this._detailListFetched = false;
       return false;
     }
+    this._detailListFetched = true;
     this._renderDetailList();
     this._updateDetailHint();
     return true;
@@ -1092,8 +1098,11 @@ class ActivityExporterPanel extends HTMLElement {
       return;
     }
     if (this._detailTarget === id) this._closeDetailEditor();
-    await this._refreshDetailList();
-    this._showDetailStatus("success", `No longer saving extra detail for ${name}.`);
+    const refreshed = await this._refreshDetailList();
+    this._showDetailStatus(
+      "success",
+      `No longer saving extra detail for ${name}.${refreshed ? "" : STALE_LIST_NOTE}`
+    );
     this._els.detailTitle.focus();
   }
 
@@ -1139,10 +1148,10 @@ class ActivityExporterPanel extends HTMLElement {
   _renderDetailEditor(id, result) {
     const editor = this._els.detailEditor;
     editor.innerHTML = "";
-    const details = result.details || [];
-    const choices = detailChoices(details);
     const savedEntry = this._detailList.find((entry) => entry.source_entity_id === id);
     const saved = new Set(savedEntry ? savedEntry.attributes : []);
+    const details = withSavedDetails(result.details || [], [...saved]);
+    const choices = detailChoices(details);
     const name = result.name || this._hass?.states?.[id]?.attributes?.friendly_name || id;
 
     const heading = document.createElement("h3");
@@ -1243,8 +1252,11 @@ class ActivityExporterPanel extends HTMLElement {
       return;
     }
     this._closeDetailEditor();
-    await this._refreshDetailList();
-    this._showDetailStatus("success", "Saving from now on. Earlier history doesn't have these details.");
+    const refreshed = await this._refreshDetailList();
+    this._showDetailStatus(
+      "success",
+      `Saving from now on. Earlier history doesn't have these details.${refreshed ? "" : STALE_LIST_NOTE}`
+    );
     this._els.detailTitle.focus();
   }
 
@@ -1429,14 +1441,16 @@ class ActivityExporterPanel extends HTMLElement {
    * Fetch (or reuse) every chosen device's records for the range, resolving to a Map of id to records with causes attached.
    */
   async _loadRecords(entityIds, startMs, endMs) {
-    const detailList = await this._listDetails().catch(() => []);
+    const detailList = this._detailListFetched
+      ? this._detailList
+      : await this._listDetails().catch(() => []);
     const mirrorBySource = new Map();
     for (const id of entityIds) {
       const entry = detailList.find((item) => item.source_entity_id === id && item.mirror_entity_id);
       if (entry) mirrorBySource.set(id, entry.mirror_entity_id);
     }
     const requestIds = [...entityIds, ...mirrorBySource.values()];
-    const key = buildCacheKey(requestIds, startMs, endMs);
+    const key = buildCacheKey(requestIds, startMs, endMs, detailList);
     const startISO = new Date(startMs).toISOString();
     const endISO = new Date(endMs).toISOString();
     const chunks = chunkRangeByDay(startISO, endISO);
