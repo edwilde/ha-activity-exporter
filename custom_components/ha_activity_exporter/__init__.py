@@ -20,6 +20,7 @@ from homeassistant.core import HomeAssistant
 
 from .const import (
     DATA_STATIC_REGISTERED,
+    DATA_WS_REGISTERED,
     DOMAIN,
     PANEL_ICON,
     PANEL_JS_URL,
@@ -28,6 +29,8 @@ from .const import (
     PANEL_URL_PATH,
     PANEL_WEBCOMPONENT_NAME,
 )
+
+from .websocket import async_register_commands
 
 PLATFORMS = [Platform.SENSOR]
 
@@ -45,6 +48,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             [StaticPathConfig(PANEL_URL_BASE, str(frontend_dir), False)]
         )
         domain_data[DATA_STATIC_REGISTERED] = True
+
+    # Commands cannot be unregistered, so register them once per process.
+    if not domain_data.get(DATA_WS_REGISTERED):
+        async_register_commands(hass)
+        domain_data[DATA_WS_REGISTERED] = True
 
     # Removing any stale registration first avoids the "Overwriting panel" error
     # when the entry is reloaded (panel_custom has no update flag).

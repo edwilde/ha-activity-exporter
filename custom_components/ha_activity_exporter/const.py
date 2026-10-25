@@ -20,6 +20,8 @@ PANEL_JS_URL = f"{PANEL_URL_BASE}/{PANEL_JS_FILENAME}"
 
 # hass.data key marking that the (process-wide) static path has been registered.
 DATA_STATIC_REGISTERED = "static_registered"
+# hass.data key marking that the (process-wide) WebSocket commands are registered.
+DATA_WS_REGISTERED = "ws_registered"
 
 # Detail recording: mirror entities that save attributes the recorder drops.
 CONF_TRACKED = "tracked"
