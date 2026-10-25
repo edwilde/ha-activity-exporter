@@ -216,6 +216,37 @@ function multiGroups() {
 
 ---
 
+## Validation review
+
+Opus delta review, 2026-10-25. The fixture was run through the real `exporter-core.js`: the split header is exactly `entity_id,name,timestamp,value,seconds_since_previous,brightness,brightness_percent,color_mode,color_temp_kelvin,hue,saturation,current_temperature,temperature,details` (`hvac_modes` is metadata; `friendly_name` and `supported_color_modes` stay out only when metadata is per entity). Line offsets: `isStartOfPeriod` :721, `buildJsonPayload` :760, `_export` :544. **These deltas override the task text where they conflict.**
+
+**Decisions to challenge**
+- `details` is always emitted in the split layout (as `toCsv` does), not "only if a leftover exists". Here it is an empty column.
+- The tie-break test must use a selection order that is not alphabetical (`["light.hall", "light.bedside", "climate.lounge"]`), or sorting by id would also pass.
+- Replace the "-1.5 stays numeric" test (already guaranteed by `csvEscape`) with: a friendly name `=cmd` in the `name` column comes out `'=cmd`.
+- The Task 1 fixture has no repeats, causes, leftovers or `name` attribute. The `changed_by`, `attribute_name` and per-entity Skip repeats tests each build their own small fixture.
+- The per-entity metadata test also asserts `supported_color_modes` is absent.
+
+**Decisions to add**
+- Thread the fixed-column set through `flattenAttributes` and `buildColumns` (both exported) as an optional argument defaulting to `FIXED_COLUMNS`, so single output stays byte-identical.
+- Core test: one entity's repeats do not affect another's (`filterRepeats` per group).
+- When some selected devices have no rows, the success message names them in plain language ("No history for Hall in this period.").
+- JSON top-level `record_count` and the large-file warning count rows after Skip repeats, as single mode does.
+- The byte-identical single-download check fixes `Date.now()` or compares everything except `exported_at`.
+
+**Lifecycle-stage misapplications**
+- Selection changes do **not** call `_invalidateCache()`; the sorted-id cache key already decides whether to refetch (so a reorder reuses the cache). Task 4's "calls `_invalidateCache()`" is withdrawn.
+- `_export` copies `this._entityIds` at its start and passes that copy through fetch, naming and formatting, so a selection edited mid-fetch cannot desync.
+- Per entity, in order: `filterRepeats`, then formatting (which computes `seconds_since_previous` per entity), then the global merge. Never compute gaps on the merged list.
+- `_retryCauses` loops over the cached Map's keys, not the live selection.
+
+**Risks under-weighted**
+- The mock harness has no Lit context provider, so Task 4 can pass there while the real picker fails on HA 2026.7+. The real-HA picker check is a **release gate** for 1.2.0, not a note.
+- Each history chunk response grows with the number of devices. Try a busy 20-device day in the harness before keeping the cap at 20.
+- Merge by (timestamp, selection index, row index) with a stable sort; ties are exact float equality only.
+
+---
+
 ## Picker research
 
 Checked against home-assistant/frontend `dev` (2026-10-24) and release 20260930.5:

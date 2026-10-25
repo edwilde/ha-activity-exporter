@@ -75,6 +75,11 @@ custom_components/ha_activity_exporter/
   selects literal 0 for both timestamps. Its real `last_changed` is not available
   from `history_during_period`, so the JSON marks that first row
   `start_of_period: true` with `last_changed: null` instead of claiming a change.
+- `ha-entity-picker` (and the plural `ha-entities-picker`) have **no `hass`
+  property** since home-assistant/frontend PR #52833 (2026-06-24): they read states
+  and registries from Lit context, so they only work as DOM descendants of HA's
+  context provider. Both are lazy-loaded by HA pages and may be undefined when the
+  panel renders, which is why the datalist fallback exists.
 - `single_config_entry: true` in the manifest makes core handle single-instance
   (aborts the second flow, hides "Add") — no manual guard needed.
 - **manifest.json keys must be ordered `domain, name, then alphabetical`** or
