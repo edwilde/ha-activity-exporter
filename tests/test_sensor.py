@@ -1,5 +1,6 @@
 """Tests for the hidden mirror sensors that save attributes the recorder drops."""
 
+from homeassistant.components.frontend import DATA_PANELS
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
@@ -7,7 +8,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.ha_activity_exporter.const import CONF_TRACKED, DOMAIN
+from custom_components.ha_activity_exporter.const import CONF_TRACKED, DOMAIN, PANEL_URL_PATH
 
 LAMP = "light.lamp"
 MIRROR = "sensor.activity_exporter_light_lamp"
@@ -169,7 +170,7 @@ async def test_dropped_names_are_kept_for_the_list_command(
 async def test_changing_options_adds_a_mirror_for_a_new_source(
     hass: HomeAssistant,
 ) -> None:
-    """Saving new options reloads the entry and mirrors the new source."""
+    """Saving new options mirrors the new source."""
     _set_lamp(hass, brightness=1)
     hass.states.async_set("fan.desk", "on", {"percentage": 50})
     entry = await _setup(hass)
@@ -184,6 +185,71 @@ async def test_changing_options_adds_a_mirror_for_a_new_source(
     fan = hass.states.get("sensor.activity_exporter_fan_desk")
     assert fan.attributes["percentage"] == 50
     assert set(entry.runtime_data) == {LAMP, "fan.desk"}
+
+
+async def test_changing_options_keeps_the_entry_loaded_and_existing_mirrors(
+    hass: HomeAssistant,
+) -> None:
+    """An options change updates the mirrors without unloading the entry or the panel."""
+    _set_lamp(hass, brightness=1)
+    hass.states.async_set("fan.desk", "on", {"percentage": 50})
+    entry = await _setup(hass)
+    lamp_mirror = entry.runtime_data[LAMP]
+    states: list[ConfigEntryState] = []
+    entry.async_on_state_change(lambda: states.append(entry.state))
+
+    hass.config_entries.async_update_entry(
+        entry,
+        options={CONF_TRACKED: {LAMP: ["brightness"], "fan.desk": ["percentage"]}},
+    )
+    await hass.async_block_till_done()
+
+    assert states == []
+    assert entry.state is ConfigEntryState.LOADED
+    assert PANEL_URL_PATH in hass.data[DATA_PANELS]
+    assert entry.runtime_data[LAMP] is lamp_mirror
+
+
+async def test_dropping_a_source_removes_its_mirror(hass: HomeAssistant) -> None:
+    """A source no longer tracked loses its mirror from the entry and the state machine."""
+    _set_lamp(hass, brightness=1)
+    hass.states.async_set("fan.desk", "on", {"percentage": 50})
+    entry = await _setup(
+        hass, {LAMP: ["brightness"], "fan.desk": ["percentage"]}
+    )
+    fan_mirror = "sensor.activity_exporter_fan_desk"
+    assert hass.states.get(fan_mirror) is not None
+
+    hass.config_entries.async_update_entry(
+        entry, options={CONF_TRACKED: {LAMP: ["brightness"]}}
+    )
+    await hass.async_block_till_done()
+
+    assert hass.states.get(fan_mirror) is None
+    assert set(entry.runtime_data) == {LAMP}
+    assert hass.states.get(MIRROR).state == "on"
+
+
+async def test_changing_the_chosen_details_updates_the_mirror_in_place(
+    hass: HomeAssistant,
+) -> None:
+    """A new chosen list takes effect at once and on later writes."""
+    _set_lamp(hass, brightness=120, color_mode="hs")
+    entry = await _setup(hass, {LAMP: ["brightness"]})
+    assert "color_mode" not in hass.states.get(MIRROR).attributes
+
+    hass.config_entries.async_update_entry(
+        entry, options={CONF_TRACKED: {LAMP: ["color_mode"]}}
+    )
+    await hass.async_block_till_done()
+
+    attributes = hass.states.get(MIRROR).attributes
+    assert attributes["color_mode"] == "hs"
+    assert "brightness" not in attributes
+    _set_lamp(hass, brightness=130, color_mode="xy")
+    await hass.async_block_till_done()
+    assert hass.states.get(MIRROR).attributes["color_mode"] == "xy"
+    assert entry.runtime_data[LAMP].chosen == ["color_mode"]
 
 
 async def test_unloading_the_entry_removes_the_mirrors(hass: HomeAssistant) -> None:

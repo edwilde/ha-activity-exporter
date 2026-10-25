@@ -229,6 +229,25 @@ async def test_save_adds_then_empty_list_removes_the_source(
     assert hass.states.get(MIRROR) is None
 
 
+async def test_back_to_back_saves_both_succeed_and_the_mirror_follows(
+    hass: HomeAssistant, hass_ws_client: ClientSessionGenerator
+) -> None:
+    """A save right after another is never refused as not loaded."""
+    entry = await _setup(hass)
+    client = await hass_ws_client(hass)
+
+    first = await _call(
+        client, WS_DETAIL_SAVE, entity_id=LAMP, attributes=["brightness", "color_mode"]
+    )
+    second = await _call(client, WS_DETAIL_SAVE, entity_id=LAMP, attributes=["color_mode"])
+    await hass.async_block_till_done()
+
+    assert first["success"]
+    assert second["success"]
+    assert entry.runtime_data[LAMP].chosen == ["color_mode"]
+    assert hass.states.get(MIRROR).attributes["color_mode"] == "hs"
+
+
 async def test_save_keeps_other_sources_when_changing_one(
     hass: HomeAssistant, hass_ws_client: ClientSessionGenerator
 ) -> None:

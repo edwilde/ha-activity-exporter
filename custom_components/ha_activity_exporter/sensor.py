@@ -44,6 +44,35 @@ async def async_setup_entry(
     entry.runtime_data.update(mirrors)
     async_add_entities(mirrors.values())
 
+    async def _options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
+        """Bring the mirrors in line with the saved options."""
+        await _sync_mirrors(hass, entry, async_add_entities)
+
+    entry.async_on_unload(entry.add_update_listener(_options_updated))
+
+
+async def _sync_mirrors(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Add, remove or update mirrors so they match the tracked options."""
+    tracked: dict[str, list[str]] = entry.options.get(CONF_TRACKED, {})
+    mirrors: dict[str, DetailMirror] = entry.runtime_data
+    dropped = [mirrors.pop(source) for source in set(mirrors) - set(tracked)]
+    added = [
+        DetailMirror(source, chosen, _display_name(hass, source))
+        for source, chosen in tracked.items()
+        if source not in mirrors
+    ]
+    mirrors.update({mirror.source_entity_id: mirror for mirror in added})
+    for source, chosen in tracked.items():
+        mirrors[source].async_set_chosen(chosen)
+    if added:
+        async_add_entities(added)
+    for mirror in dropped:
+        await mirror.async_remove(force_remove=True)
+
 
 class DetailMirror(SensorEntity):
     """A hidden sensor that copies a source's state and its chosen attributes."""
@@ -75,6 +104,17 @@ class DetailMirror(SensorEntity):
             )
         )
         self._apply(self.hass.states.get(self.source_entity_id))
+
+    @callback
+    def async_set_chosen(self, chosen: Collection[str]) -> None:
+        """Save a new list of attributes and re-copy the source with it."""
+        chosen = list(chosen)
+        if chosen == self.chosen:
+            return
+        self.chosen = chosen
+        if self.hass is not None:
+            self._applied = None
+            self._apply(self.hass.states.get(self.source_entity_id))
 
     @callback
     def _handle_source_event(self, event: Event[EventStateChangedData]) -> None:
