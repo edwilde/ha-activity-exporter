@@ -49,7 +49,7 @@ Home Assistant recorded (optionally minus the repeats).
 2. **What do you want to export?** Start typing the name of a device or sensor and pick it. To export several at once, add another; each chosen device is listed with a Remove button.
 3. **Time period** — tap a quick button, or choose your own start and end dates.
 4. Optionally turn on **Skip repeats** to leave out rows where nothing changed.
-5. Leave **Give each setting its own column** on to get one spreadsheet column per setting (brightness, colour, temperature and so on), or turn it off for a simple three-column file (five columns when several devices are chosen).
+5. Leave **Give each setting its own column** on to get one spreadsheet column per setting (temperature, position, mode and so on; for lights see [Lights: brightness and colour](#lights-brightness-and-colour)), or turn it off for a simple three-column file (five columns when several devices are chosen).
 6. Click **Download spreadsheet (CSV)** or **Download data file (JSON)**.
 
 ## What the files look like
@@ -57,30 +57,32 @@ Home Assistant recorded (optionally minus the repeats).
 **CSV** - one row each time Home Assistant recorded a change, including changes to a setting while the value stays the same. `seconds_since_previous` is the time since the row above it, and each setting has its own column. Descriptive information such as the name, icon, units and supported modes is left out of the columns; `details` holds anything that could not get a column.
 
 ```csv
-timestamp,value,seconds_since_previous,brightness,brightness_percent,color_mode,hue,saturation,red,green,blue,x,y,details
-2026-05-30T06:30:00+12:00,on,,26,10.2,hs,30,80,255,170,51,0.55,0.39,
-2026-05-30T06:30:30+12:00,on,30,51,20,hs,30,70,255,189,77,0.5,0.39,
-2026-05-30T06:31:00+12:00,on,30,77,30.2,hs,30,60,255,204,102,0.46,0.39,
+timestamp,value,seconds_since_previous,current_temperature,hvac_action,temperature,changed_by,details
+2026-05-30T06:00:00+12:00,off,,17.5,off,20,,
+2026-05-30T06:30:00+12:00,heat,1800,17.6,heating,21,script.morning_warmup (Morning warm-up),
+2026-05-30T06:42:30+12:00,heat,750,18.9,heating,21,,
 ```
 
 With **Give each setting its own column** turned off, the header is `timestamp,value,details` and `details` holds all the extra information as compact JSON.
 
-When Home Assistant knows what caused a change, the spreadsheet gains a `changed_by` column just before `details`. It names the script, automation, action or person behind an on/off style change, for example `script.weekend_sunrise (Weekend sunrise)` or `light.turn_on`. A person is shown by name when they are set up in Home Assistant as a person with a user account, otherwise by an id such as `user 3f2a...`. In the JSON file the same information appears as a `cause` entry on that row. The column is left out of the spreadsheet when none of the rows has a cause, and it does not appear when each setting's own column is turned off.
+When Home Assistant knows what caused a change, the spreadsheet gains a `changed_by` column just before `details`. It names the script, automation, action or person behind an on/off style change, for example `script.morning_warmup (Morning warm-up)`, as in the example above, or `light.turn_on`. A person is shown by name when they are set up in Home Assistant as a person with a user account, otherwise by an id such as `user 3f2a...`. In the JSON file the same information appears as a `cause` entry on that row. The column is left out of the spreadsheet when none of the rows has a cause, and it does not appear when each setting's own column is turned off.
 
-**JSON** - a self-describing wrapper so an LLM has all the context it needs. `entity` describes the device, and each record has a `derived` block with values worked out for you, such as whether the value itself changed and the seconds since the previous row (shown here for two records):
+**JSON** - a self-describing wrapper so an LLM has all the context it needs. `entity` describes the device, and each record has a `derived` block with values worked out for you, such as whether the value itself changed and the seconds since the previous row (shown here for the three-row export above):
 
 ```json
 {
-  "entity_id": "light.bedroom_lamp",
-  "friendly_name": "Bedroom Lamp",
+  "entity_id": "climate.lounge",
+  "friendly_name": "Lounge heat pump",
   "entity": {
-    "entity_id": "light.bedroom_lamp",
-    "friendly_name": "Bedroom Lamp",
-    "domain": "light",
+    "entity_id": "climate.lounge",
+    "friendly_name": "Lounge heat pump",
+    "domain": "climate",
     "capabilities": {
-      "friendly_name": "Bedroom Lamp",
-      "supported_color_modes": [
-        "hs"
+      "friendly_name": "Lounge heat pump",
+      "hvac_modes": [
+        "off",
+        "heat",
+        "cool"
       ]
     }
   },
@@ -90,59 +92,80 @@ When Home Assistant knows what caused a change, the spreadsheet gains a `changed
     "end": "2026-05-30T07:00:00+12:00"
   },
   "state_changes_only": false,
-  "record_count": 2,
+  "record_count": 3,
   "records": [
     {
-      "timestamp": "2026-05-30T06:30:00+12:00",
-      "last_changed": "2026-05-30T06:30:00+12:00",
-      "state": "on",
+      "timestamp": "2026-05-30T06:00:00+12:00",
+      "last_changed": null,
+      "state": "off",
       "attributes": {
-        "friendly_name": "Bedroom Lamp",
-        "supported_color_modes": [
-          "hs"
+        "friendly_name": "Lounge heat pump",
+        "hvac_modes": [
+          "off",
+          "heat",
+          "cool"
         ],
-        "color_mode": "hs",
-        "brightness": 26,
-        "hs_color": [
-          30,
-          80
-        ]
+        "hvac_action": "off",
+        "current_temperature": 17.5,
+        "temperature": 20
       },
       "derived": {
-        "state_changed": true,
-        "seconds_since_previous": null,
-        "brightness_percent": 10.2
+        "state_changed": null,
+        "start_of_period": true,
+        "seconds_since_previous": null
       }
     },
     {
-      "timestamp": "2026-05-30T06:30:30+12:00",
+      "timestamp": "2026-05-30T06:30:00+12:00",
       "last_changed": "2026-05-30T06:30:00+12:00",
-      "state": "on",
+      "state": "heat",
       "attributes": {
-        "friendly_name": "Bedroom Lamp",
-        "supported_color_modes": [
-          "hs"
+        "friendly_name": "Lounge heat pump",
+        "hvac_modes": [
+          "off",
+          "heat",
+          "cool"
         ],
-        "color_mode": "hs",
-        "brightness": 51,
-        "hs_color": [
-          30,
-          70
-        ]
+        "hvac_action": "heating",
+        "current_temperature": 17.6,
+        "temperature": 21
+      },
+      "derived": {
+        "state_changed": true,
+        "seconds_since_previous": 1800
+      },
+      "cause": {
+        "context_entity_id": "script.morning_warmup",
+        "context_name": "Morning warm-up"
+      }
+    },
+    {
+      "timestamp": "2026-05-30T06:42:30+12:00",
+      "last_changed": "2026-05-30T06:30:00+12:00",
+      "state": "heat",
+      "attributes": {
+        "friendly_name": "Lounge heat pump",
+        "hvac_modes": [
+          "off",
+          "heat",
+          "cool"
+        ],
+        "hvac_action": "heating",
+        "current_temperature": 18.9,
+        "temperature": 21
       },
       "derived": {
         "state_changed": false,
-        "seconds_since_previous": 30,
-        "brightness_percent": 20
+        "seconds_since_previous": 750
       }
     }
   ]
 }
 ```
 
-`last_changed` is when the value itself last changed, so on a row where only a setting changed it is earlier than `timestamp` (above, the lamp turned on at 06:30:00 and brightened at 06:30:30).
+`last_changed` is when the value itself last changed, so on a row where only a setting changed it is earlier than `timestamp` (above, the heat pump switched on at 06:30:00 and its room temperature reading was updated at 06:42:30).
 
-The first row is usually the value at the start of the period, which Home Assistant stamps with the period's start time. It does not say when that value began, so in JSON that row has `last_changed: null` and `derived.start_of_period: true` (with `state_changed: null`). To find out how long the value had been in place, look at the next row where only a setting changed: its `last_changed` can reach back before the period. The spreadsheet shows the same first row at the period's start time, with no marker.
+The first row is usually the value at the start of the period, which Home Assistant stamps with the period's start time (the 06:00:00 row above). It does not say when that value began, so in JSON that row has `last_changed: null` and `derived.start_of_period: true` (with `state_changed: null`). To find out how long the value had been in place, look at the next row where only a setting changed: its `last_changed` can reach back before the period. The spreadsheet shows the same first row at the period's start time, with no marker.
 
 `state_changes_only` is `true` when **Skip repeats** was on. With it on, `seconds_since_previous` is the time since the previous row in the file, so it spans any rows that were left out.
 
@@ -150,19 +173,22 @@ The first row is usually the value at the start of the period, which Home Assist
 
 Choose two or more devices (up to 20) and the download is still one file, with every device's history on a single timeline. With one device chosen the files are exactly as described above.
 
-**CSV** - rows run in time order across all the devices, and `entity_id` and `name` come first so you can tell whose row is whose. `seconds_since_previous` is measured to that same device's previous row, not to the row above it. The columns are the combined settings of every chosen device, so a mix of different kinds of device gives a wide file where most cells on any row are blank. With **Give each setting its own column** turned off, the columns are `entity_id,name,timestamp,value,details`.
+**CSV** - rows run in time order across all the devices, and `entity_id` and `name` come first so you can tell whose row is whose. `seconds_since_previous` is measured to that same device's previous row, not to the row above it. The columns are the combined settings of every chosen device, so a mix of different kinds of device gives a wide file where most cells on any row are blank. In the example the lamp's own rows carry only on and off, and its brightness and colour come from the rows of its settings sensor, set up as described in [Lights: brightness and colour](#lights-brightness-and-colour): the sensor's `value` is the brightness (0 to 255) and its `hs_color` becomes the `hue` and `saturation` columns. With **Give each setting its own column** turned off, the columns are `entity_id,name,timestamp,value,details`.
 
 ```csv
-entity_id,name,timestamp,value,seconds_since_previous,brightness,brightness_percent,color_mode,color_temp_kelvin,hue,saturation,current_temperature,temperature,details
-light.bedside,Bedside,2026-01-15T13:00:00+13:00,off,,,,,,,,,,
-light.hall,Hall,2026-01-15T13:00:00+13:00,on,,255,100,color_temp,3000,,,,,
-climate.lounge,Lounge,2026-01-15T13:00:30+13:00,heat,,,,,,,,-1.5,21,
-light.bedside,Bedside,2026-01-15T13:01:00+13:00,on,60,26,10.2,hs,,30,80,,,
-light.hall,Hall,2026-01-15T13:01:00+13:00,on,60,128,50.2,color_temp,3000,,,,,
-light.bedside,Bedside,2026-01-15T13:01:30+13:00,on,30,51,20,hs,,30,70,,,
+entity_id,name,timestamp,value,seconds_since_previous,color_mode,hue,saturation,current_temperature,hvac_action,temperature,details
+light.bedroom_lamp,Bedroom lamp,2026-01-15T13:00:00+13:00,off,,,,,,,,
+sensor.bedroom_lamp_settings,Bedroom lamp settings,2026-01-15T13:00:00+13:00,0,,,,,,,,
+climate.lounge,Lounge heat pump,2026-01-15T13:00:00+13:00,heat,,,,,20.8,idle,20,
+light.bedroom_lamp,Bedroom lamp,2026-01-15T13:10:00+13:00,on,600,,,,,,,
+sensor.bedroom_lamp_settings,Bedroom lamp settings,2026-01-15T13:10:00+13:00,128,600,hs,30,80,,,,
+sensor.bedroom_lamp_settings,Bedroom lamp settings,2026-01-15T13:10:30+13:00,128,30,hs,30,60,,,,
+climate.lounge,Lounge heat pump,2026-01-15T13:15:00+13:00,heat,900,,,,20.2,heating,22,
+light.bedroom_lamp,Bedroom lamp,2026-01-15T13:25:00+13:00,off,900,,,,,,,
+sensor.bedroom_lamp_settings,Bedroom lamp settings,2026-01-15T13:25:00+13:00,0,870,,,,,,,
 ```
 
-**JSON** - the shared period and totals come first, then an `entities` list. Each entry has the same shape as the single-device file (without the period and export time, which are shared), and each device's `derived` values are worked out from that device's own rows. The excerpt below is trimmed to the first record of two of the three devices; `entity_count` and `record_count` describe the full file.
+**JSON** - the shared period and totals come first, then an `entities` list. Each entry has the same shape as the single-device file (without the period and export time, which are shared), and each device's `derived` values are worked out from that device's own rows. The excerpt below is trimmed to the second record of the lamp and of its settings sensor, and leaves out the heat pump; `entity_count` and `record_count` describe the full file.
 
 ```json
 {
@@ -173,18 +199,19 @@ light.bedside,Bedside,2026-01-15T13:01:30+13:00,on,30,51,20,hs,,30,70,,,
   },
   "state_changes_only": false,
   "entity_count": 3,
-  "record_count": 6,
+  "record_count": 9,
   "entities": [
     {
-      "entity_id": "light.bedside",
-      "friendly_name": "Bedside",
+      "entity_id": "light.bedroom_lamp",
+      "friendly_name": "Bedroom lamp",
       "entity": {
-        "entity_id": "light.bedside",
-        "friendly_name": "Bedside",
+        "entity_id": "light.bedroom_lamp",
+        "friendly_name": "Bedroom lamp",
         "domain": "light",
         "capabilities": {
-          "friendly_name": "Bedside",
+          "friendly_name": "Bedroom lamp",
           "supported_color_modes": [
+            "color_temp",
             "hs"
           ]
         }
@@ -192,58 +219,51 @@ light.bedside,Bedside,2026-01-15T13:01:30+13:00,on,30,51,20,hs,,30,70,,,
       "record_count": 3,
       "records": [
         {
-          "timestamp": "2026-01-15T13:00:00+13:00",
-          "last_changed": null,
-          "state": "off",
+          "timestamp": "2026-01-15T13:10:00+13:00",
+          "last_changed": "2026-01-15T13:10:00+13:00",
+          "state": "on",
           "attributes": {
-            "friendly_name": "Bedside",
+            "friendly_name": "Bedroom lamp",
             "supported_color_modes": [
+              "color_temp",
               "hs"
-            ],
-            "color_mode": null,
-            "brightness": null
+            ]
           },
           "derived": {
-            "state_changed": null,
-            "start_of_period": true,
-            "seconds_since_previous": null
+            "state_changed": true,
+            "seconds_since_previous": 600
           }
         }
       ]
     },
     {
-      "entity_id": "climate.lounge",
-      "friendly_name": "Lounge",
+      "entity_id": "sensor.bedroom_lamp_settings",
+      "friendly_name": "Bedroom lamp settings",
       "entity": {
-        "entity_id": "climate.lounge",
-        "friendly_name": "Lounge",
-        "domain": "climate",
+        "entity_id": "sensor.bedroom_lamp_settings",
+        "friendly_name": "Bedroom lamp settings",
+        "domain": "sensor",
         "capabilities": {
-          "friendly_name": "Lounge",
-          "hvac_modes": [
-            "off",
-            "heat"
-          ]
+          "friendly_name": "Bedroom lamp settings"
         }
       },
-      "record_count": 1,
+      "record_count": 4,
       "records": [
         {
-          "timestamp": "2026-01-15T13:00:30+13:00",
-          "last_changed": "2026-01-15T13:00:30+13:00",
-          "state": "heat",
+          "timestamp": "2026-01-15T13:10:00+13:00",
+          "last_changed": "2026-01-15T13:10:00+13:00",
+          "state": "128",
           "attributes": {
-            "friendly_name": "Lounge",
-            "hvac_modes": [
-              "off",
-              "heat"
-            ],
-            "current_temperature": -1.5,
-            "temperature": 21
+            "friendly_name": "Bedroom lamp settings",
+            "color_mode": "hs",
+            "hs_color": [
+              30,
+              80
+            ]
           },
           "derived": {
             "state_changed": true,
-            "seconds_since_previous": null
+            "seconds_since_previous": 600
           }
         }
       ]
@@ -290,7 +310,7 @@ From then on, export the light and its settings sensor together: the sensor's va
   nothing to export.
 - The whole result is assembled in your browser, so extremely long ranges of a very
   chatty sensor may be slow.
-- `changed_by` is blank for steps that only change a setting (brightness, colour), because Home Assistant only notes what caused a change of value. It is also blank for sensors that report a unit, which Home Assistant leaves out of its activity log.
+- `changed_by` is blank for steps that only change a setting (a room temperature reading, for example), because Home Assistant only notes what caused a change of value. It is also blank for sensors that report a unit, which Home Assistant leaves out of its activity log.
 
 ## Development & testing
 

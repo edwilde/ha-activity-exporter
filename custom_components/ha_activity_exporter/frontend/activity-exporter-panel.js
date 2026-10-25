@@ -302,7 +302,7 @@ class ActivityExporterPanel extends HTMLElement {
             <input type="checkbox" id="split-columns" checked />
             <span class="toggle-text">
               <span class="label">Give each setting its own column</span>
-              <span class="help toggle-help">Puts things like brightness, colour and temperature in separate spreadsheet columns. Turn off for a simpler file with fewer columns.</span>
+              <span class="help toggle-help">Puts things like temperature, position and mode in separate spreadsheet columns. Turn off for a simpler file with fewer columns.</span>
             </span>
           </label>
         </div>
