@@ -66,7 +66,9 @@
     states[`sensor.extra_${String(n).padStart(2, "0")}`] = { state: "1", attributes: { friendly_name: `Extra sensor ${n}`, unit_of_measurement: "W", state_class: "measurement" } };
   }
 
+  /** Interpolate linearly between two numbers. */
   function lerp(a, b, t) { return a + (b - a) * t; }
+  /** Build the bedside light's history rows for a two-hour sunrise ramp. */
   function bedsideRows() {
     const caps = lights["light.bedroom_kitty_bedside_light"];
     const rows = [{ s: "off", a: { ...caps, color_mode: null, brightness: null, hs_color: null }, lu: sunriseStart - 3600 }];
@@ -116,6 +118,7 @@
   const hass = {
     states,
     config: { time_zone: "Pacific/Auckland" },
+    /** Answer a mocked history or logbook request for the requested window. */
     async callWS(msg) {
       window.__calls.push(msg);
       const start = Date.parse(msg.start_time) / 1000;
@@ -139,6 +142,7 @@
 
   if (params.get("picker") === "1") {
     class StubEntityPicker extends HTMLElement {
+      /** Build the stub with a native select inside. */
       constructor() {
         super();
         this.attachShadow({ mode: "open" });
@@ -153,6 +157,7 @@
           this.dispatchEvent(new CustomEvent("value-changed", { detail: { value: this._value }, bubbles: true, composed: true }));
         });
       }
+      /** Do nothing, like the real picker. */
       focus() {}
       set hass(hass) { this._hass = hass; this._render(); }
       get hass() { return this._hass; }
@@ -162,6 +167,7 @@
       get label() { return this._label; }
       set excludeEntities(v) { this._exclude = v || []; this._render(); }
       get excludeEntities() { return this._exclude; }
+      /** Rebuild the select options from the states, leaving out excluded devices. */
       _render() {
         if (!this._hass) return;
         const ids = Object.keys(this._hass.states).filter((id) => id === this._value || !this._exclude.includes(id)).sort();

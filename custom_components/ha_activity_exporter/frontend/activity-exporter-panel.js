@@ -641,9 +641,11 @@ class ActivityExporterPanel extends HTMLElement {
     }
     this._els.chosenList.querySelectorAll(".chosen-row").forEach((row) => {
       const label = this._choiceLabel(row.dataset.id);
-      row.querySelector("button.remove").setAttribute("aria-label", `Remove ${label}`);
+      const remove = row.querySelector("button.remove");
+      const removeLabel = `Remove ${label}`;
+      if (remove.getAttribute("aria-label") !== removeLabel) remove.setAttribute("aria-label", removeLabel);
       const name = row.querySelector(".chosen-name");
-      if (name) name.textContent = label;
+      if (name && name.textContent !== label) name.textContent = label;
     });
   }
 

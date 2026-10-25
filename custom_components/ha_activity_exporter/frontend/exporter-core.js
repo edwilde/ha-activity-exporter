@@ -678,102 +678,51 @@ export function secondsSincePrevious(records, index) {
   return Math.round(records[index].timestampMs - records[index - 1].timestampMs) / 1000;
 }
 
-/**
- * Build CSV text with CRLF line endings, one column per setting unless splitColumns is false.
- *
- * @param {{timestampMs:number, state:string, attributes:object, cause?:object}[]} records oldest-first
- * @param {string} [timeZone]
- * @param {{splitColumns?: boolean, userNames?: Record<string, string>}} [options]
- */
-export function toCsv(records, timeZone, { splitColumns = true, userNames } = {}) {
-  if (!splitColumns) {
-    const lines = ["timestamp,value,details"];
-    for (const r of records) {
-      lines.push(
-        [
-          csvEscape(formatTimestamp(r.timestampMs, timeZone)),
-          csvEscape(r.state),
-          csvEscape(JSON.stringify(r.attributes || {})),
-        ].join(",")
-      );
-    }
-    return lines.join("\r\n");
-  }
-  const metadata = metadataKeys(records);
-  const columns = buildColumns(records, metadata);
-  const showCauses = records.some((r) => describeCause(r.cause, userNames) !== "");
-  const lines = [
-    [
-      "timestamp",
-      "value",
-      "seconds_since_previous",
-      ...columns,
-      ...(showCauses ? ["changed_by"] : []),
-      "details",
-    ]
-      .map(csvEscape)
-      .join(","),
-  ];
-  records.forEach((r, index) => {
-    const { cells, leftovers } = flattenAttributes(r.attributes, metadata);
-    const details = Object.keys(leftovers).length ? JSON.stringify(leftovers) : "";
-    lines.push(
-      [
-        formatTimestamp(r.timestampMs, timeZone),
-        r.state,
-        secondsSincePrevious(records, index),
-        ...columns.map((name) => cells[name]),
-        ...(showCauses ? [describeCause(r.cause, userNames)] : []),
-        details,
-      ]
-        .map(csvEscape)
-        .join(",")
-    );
-  });
-  return lines.join("\r\n");
-}
-
 /** Fixed columns of the multi-device split layout. */
 const MULTI_FIXED_COLUMNS = new Set([...FIXED_COLUMNS, "entity_id", "name"]);
 
 /**
- * Build one CSV timeline for several devices, with entity_id and name columns,
- * rows in time order and ties in the order the groups are given.
+ * Build CSV text for one or more devices, with entity_id and name columns first
+ * when `withEntity` is set and rows in time order across devices.
  *
  * @param {{entityId: string, friendlyName?: string, records: {timestampMs:number, state:string, attributes:object, cause?:object}[]}[]} groups
- *   in selection order, each with oldest-first records already filtered as wanted
- * @param {string} [timeZone]
- * @param {{splitColumns?: boolean, userNames?: Record<string, string>}} [options]
+ * @param {string|undefined} timeZone
+ * @param {{splitColumns?: boolean, userNames?: Record<string, string>}} options
+ * @param {boolean} withEntity
+ * @returns {string}
  */
-export function toMultiCsv(groups, timeZone, { splitColumns = true, userNames } = {}) {
+function buildCsv(groups, timeZone, { splitColumns = true, userNames } = {}, withEntity) {
+  const fixed = withEntity ? MULTI_FIXED_COLUMNS : FIXED_COLUMNS;
+  const entityHeader = withEntity ? ["entity_id", "name"] : [];
+  const entityCells = (group) => (withEntity ? [group.entityId, group.friendlyName] : []);
   const rows = groups.flatMap((group) =>
     group.records.map((record, index) => ({ group, record, index }))
   );
-  rows.sort((a, b) => a.record.timestampMs - b.record.timestampMs);
+  if (withEntity) rows.sort((a, b) => a.record.timestampMs - b.record.timestampMs);
   if (!splitColumns) {
-    const lines = ["entity_id,name,timestamp,value,details"];
+    const lines = [[...entityHeader, "timestamp", "value", "details"].join(",")];
     for (const { group, record } of rows) {
       lines.push(
         [
-          csvEscape(group.entityId),
-          csvEscape(group.friendlyName),
-          csvEscape(formatTimestamp(record.timestampMs, timeZone)),
-          csvEscape(record.state),
-          csvEscape(JSON.stringify(record.attributes || {})),
-        ].join(",")
+          ...entityCells(group),
+          formatTimestamp(record.timestampMs, timeZone),
+          record.state,
+          JSON.stringify(record.attributes || {}),
+        ]
+          .map(csvEscape)
+          .join(",")
       );
     }
     return lines.join("\r\n");
   }
   const metadata = new Map(groups.map((group) => [group, metadataKeys(group.records)]));
   const columns = orderColumns(
-    groups.flatMap((group) => buildColumns(group.records, metadata.get(group), MULTI_FIXED_COLUMNS))
+    groups.flatMap((group) => buildColumns(group.records, metadata.get(group), fixed))
   );
   const showCauses = rows.some(({ record }) => describeCause(record.cause, userNames) !== "");
   const lines = [
     [
-      "entity_id",
-      "name",
+      ...entityHeader,
       "timestamp",
       "value",
       "seconds_since_previous",
@@ -785,12 +734,11 @@ export function toMultiCsv(groups, timeZone, { splitColumns = true, userNames } 
       .join(","),
   ];
   for (const { group, record, index } of rows) {
-    const { cells, leftovers } = flattenAttributes(record.attributes, metadata.get(group), MULTI_FIXED_COLUMNS);
+    const { cells, leftovers } = flattenAttributes(record.attributes, metadata.get(group), fixed);
     const details = Object.keys(leftovers).length ? JSON.stringify(leftovers) : "";
     lines.push(
       [
-        group.entityId,
-        group.friendlyName,
+        ...entityCells(group),
         formatTimestamp(record.timestampMs, timeZone),
         record.state,
         secondsSincePrevious(group.records, index),
@@ -803,6 +751,30 @@ export function toMultiCsv(groups, timeZone, { splitColumns = true, userNames } 
     );
   }
   return lines.join("\r\n");
+}
+
+/**
+ * Build CSV text with CRLF line endings, one column per setting unless splitColumns is false.
+ *
+ * @param {{timestampMs:number, state:string, attributes:object, cause?:object}[]} records oldest-first
+ * @param {string} [timeZone]
+ * @param {{splitColumns?: boolean, userNames?: Record<string, string>}} [options]
+ */
+export function toCsv(records, timeZone, options) {
+  return buildCsv([{ entityId: "", records }], timeZone, options, false);
+}
+
+/**
+ * Build one CSV timeline for several devices, with entity_id and name columns,
+ * rows in time order and ties in the order the groups are given.
+ *
+ * @param {{entityId: string, friendlyName?: string, records: {timestampMs:number, state:string, attributes:object, cause?:object}[]}[]} groups
+ *   in selection order, each with oldest-first records already filtered as wanted
+ * @param {string} [timeZone]
+ * @param {{splitColumns?: boolean, userNames?: Record<string, string>}} [options]
+ */
+export function toMultiCsv(groups, timeZone, options) {
+  return buildCsv(groups, timeZone, options, true);
 }
 
 /**

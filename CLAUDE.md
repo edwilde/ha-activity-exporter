@@ -86,7 +86,8 @@ custom_components/ha_activity_exporter/
   property** since home-assistant/frontend PR #52833 (2026-06-24): they read states
   and registries from Lit context, so they only work as DOM descendants of HA's
   context provider. Both are lazy-loaded by HA pages and may be undefined when the
-  panel renders, which is why the datalist fallback exists.
+  panel renders, which is why the datalist fallback exists. The panel still sets
+  `picker.hass` for HA versions before that change; on newer ones it is ignored.
 - Since HA 2024.8 (core PR #121776) lights mark `brightness`, `color_mode`,
   `color_temp(_kelvin)`, `effect` and `hs/rgb/rgbw/rgbww/xy_color` as unrecorded, so
   `history_during_period` never returns them for a `light.*`. Settings-only rows still
