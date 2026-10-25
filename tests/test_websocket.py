@@ -217,16 +217,36 @@ async def test_save_adds_then_empty_list_removes_the_source(
 
     assert response["success"]
     assert entry.options[CONF_TRACKED] == {LAMP: ["brightness", "color_mode"]}
-    registry = er.async_get(hass)
-    assert registry.async_get_entity_id("sensor", DOMAIN, LAMP) == MIRROR
 
     response = await _call(client, WS_DETAIL_SAVE, entity_id=LAMP, attributes=[])
     await hass.async_block_till_done()
 
     assert response["success"]
     assert entry.options[CONF_TRACKED] == {}
+    registry = er.async_get(hass)
     assert registry.async_get_entity_id("sensor", DOMAIN, LAMP) is None
     assert hass.states.get(MIRROR) is None
+
+
+async def test_save_tracks_a_new_source_with_a_hidden_mirror(
+    hass: HomeAssistant, hass_ws_client: ClientSessionGenerator
+) -> None:
+    """Saving an untracked source adds its option, state and hidden registry entry."""
+    entry = await _setup(hass, {})
+    registry = er.async_get(hass)
+    assert registry.async_get_entity_id("sensor", DOMAIN, LAMP) is None
+    assert hass.states.get(MIRROR) is None
+    client = await hass_ws_client(hass)
+
+    response = await _call(client, WS_DETAIL_SAVE, entity_id=LAMP, attributes=["brightness"])
+    await hass.async_block_till_done()
+
+    assert response["success"]
+    assert entry.options[CONF_TRACKED] == {LAMP: ["brightness"]}
+    assert hass.states.get(MIRROR).attributes["brightness"] == 120
+    mirror = registry.async_get(MIRROR)
+    assert mirror.unique_id == LAMP
+    assert mirror.hidden_by is er.RegistryEntryHider.INTEGRATION
 
 
 async def test_back_to_back_saves_both_succeed_and_the_mirror_follows(

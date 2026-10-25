@@ -5,14 +5,27 @@ dependency chain (``http``, ``frontend``, ``panel_custom``) and the sensor
 platform load as they do in Home Assistant.
 """
 
+import logging
+
+import pytest
+from homeassistant.components import panel_custom
 from homeassistant.components.frontend import DATA_PANELS
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.ha_activity_exporter import async_setup_entry
-from custom_components.ha_activity_exporter.const import DOMAIN, PANEL_URL_PATH
+from custom_components.ha_activity_exporter.const import (
+    DOMAIN,
+    PANEL_JS_URL,
+    PANEL_URL_PATH,
+    PANEL_WEBCOMPONENT_NAME,
+)
+
+
+def _errors(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """Return the messages of every error-level log record."""
+    return [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
 
 
 async def _http_ready(hass: HomeAssistant) -> None:
@@ -44,14 +57,41 @@ async def test_setup_registers_panel_and_unload_removes_it(
     assert PANEL_URL_PATH not in hass.data.get(DATA_PANELS, {})
 
 
-async def test_repeated_setup_keeps_single_panel(hass: HomeAssistant) -> None:
-    """A second setup without an unload re-registers the panel without raising."""
+async def test_reload_keeps_single_panel(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Reloading a loaded entry re-registers the panel and logs no error."""
     entry = await _setup_entry(hass)
+    caplog.clear()
 
-    # Must not raise the "Overwriting panel" ValueError.
-    assert await async_setup_entry(hass, entry) is True
+    assert await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()
+
+    assert entry.state is ConfigEntryState.LOADED
     assert PANEL_URL_PATH in hass.data.get(DATA_PANELS, {})
+    assert _errors(caplog) == []
+
+
+async def test_setup_replaces_a_stale_panel(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Setup replaces a panel left registered by an earlier run without an error."""
+    entry = await _setup_entry(hass)
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await panel_custom.async_register_panel(
+        hass,
+        frontend_url_path=PANEL_URL_PATH,
+        webcomponent_name=PANEL_WEBCOMPONENT_NAME,
+        module_url=PANEL_JS_URL,
+    )
+    caplog.clear()
+
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert entry.state is ConfigEntryState.LOADED
+    assert PANEL_URL_PATH in hass.data.get(DATA_PANELS, {})
+    assert _errors(caplog) == []
 
 
 async def test_static_path_registered_once(hass: HomeAssistant) -> None:
