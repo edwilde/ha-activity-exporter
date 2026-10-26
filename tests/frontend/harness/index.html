@@ -108,6 +108,16 @@
     { when: sunriseStart, state: "on", entity_id: "light.bedroom_kitty_bedside_light", context_event_type: "script_started", context_domain: "script", context_name: "Weekend sunrise", context_message: "started", context_entity_id: "script.weekend_sunrise" },
   ];
 
+  const unrecorded = {
+    "light.bedroom_kitty_bedside_light": ["brightness", "color_mode", "hs_color"],
+    "light.hall": ["brightness", "color_mode"],
+    "climate.lounge": ["hvac_modes", "min_temp", "max_temp"],
+  };
+  const denied = new Set(["friendly_name", "supported_features", "unit_of_measurement", "device_class", "state_class", "icon", "entity_picture", "access_token"]);
+  const tracked = params.get("saved") === "1" ? { "light.hall": ["brightness"] } : {};
+  /** Name the hidden sensor that keeps a device's chosen details. */
+  function mirrorId(source) { return `sensor.activity_exporter_${source.replace(".", "_")}`; }
+
   window.__calls = [];
   window.__fail = params.get("fail");
   window.__delay = Number(params.get("delay")) || 0;
@@ -118,7 +128,8 @@
   const hass = {
     states,
     config: { time_zone: "Pacific/Auckland" },
-    /** Answer a mocked history or logbook request for the requested window. */
+    user: { is_admin: params.get("admin") !== "0" },
+    /** Answer a mocked history, logbook or kept-detail request. */
     async callWS(msg) {
       window.__calls.push(msg);
       const start = Date.parse(msg.start_time) / 1000;
@@ -132,6 +143,23 @@
           if (rows.length) result[id] = rows;
         }
         return result;
+      }
+      if (msg.type === "ha_activity_exporter/detail/list") {
+        return Object.entries(tracked).map(([id, attributes]) => ({ source_entity_id: id, mirror_entity_id: mirrorId(id), attributes: [...attributes], dropped: [] }));
+      }
+      if (msg.type === "ha_activity_exporter/detail/describe") {
+        const state = states[msg.entity_id];
+        if (!state) throw new Error("Unknown entity");
+        const keep = unrecorded[msg.entity_id] || [];
+        const details = Object.keys(state.attributes).filter((n) => !denied.has(n))
+          .map((name) => ({ name, unrecorded: keep.includes(name), volatile: false }))
+          .sort((a, b) => (b.unrecorded - a.unrecorded) || a.name.localeCompare(b.name));
+        return { entity_id: msg.entity_id, name: state.attributes.friendly_name || msg.entity_id, details };
+      }
+      if (msg.type === "ha_activity_exporter/detail/save") {
+        if (msg.attributes.length) tracked[msg.entity_id] = [...msg.attributes];
+        else delete tracked[msg.entity_id];
+        return null;
       }
       if (msg.type === "logbook/get_events") {
         return logbook.filter((e) => msg.entity_ids.includes(e.entity_id) && e.when >= start && e.when < end);

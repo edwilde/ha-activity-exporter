@@ -142,6 +142,99 @@ export function parseHistoryRecords(wsResult, entityId) {
   return records;
 }
 
+/** Attributes a mirror row carries about itself, which are not the source's details. */
+const MIRROR_KEYS = ["source_entity_id", "source_last_updated", "friendly_name"];
+
+/** Tolerance in ms when comparing a mirror row's source_last_updated to a source row's time. */
+const MIRROR_MATCH_MS = 1;
+
+/**
+ * Copy a mirror row's attributes without the keys the mirror adds about itself.
+ *
+ * @param {object} attributes a mirror record's attributes
+ * @returns {object} the saved details only
+ */
+function stripMirrorKeys(attributes) {
+  const details = { ...attributes };
+  for (const key of MIRROR_KEYS) delete details[key];
+  return details;
+}
+
+/**
+ * Merge the details a mirror saved into the source's rows, carrying each saved
+ * set forward until the next one; with no source rows, rebuild rows from the mirror.
+ *
+ * @param {{timestampMs: number, lastChangedMs: number, state: string, attributes: object}[]} sourceRecords
+ * @param {{timestampMs: number, lastChangedMs: number, state: string, attributes: object}[]} mirrorRecords
+ * @returns {{timestampMs: number, lastChangedMs: number, state: string, attributes: object}[]} new records, oldest first
+ */
+export function mergeMirrorRecords(sourceRecords, mirrorRecords) {
+  const mirrors = mirrorRecords
+    .filter((m) => typeof m.attributes.source_last_updated === "number")
+    .sort((a, b) => a.attributes.source_last_updated - b.attributes.source_last_updated);
+  if (sourceRecords.length === 0) {
+    return mirrors.map((m) => ({
+      ...m,
+      timestampMs: m.attributes.source_last_updated * 1000,
+      lastChangedMs: m.attributes.source_last_updated * 1000,
+      attributes: stripMirrorKeys(m.attributes),
+    }));
+  }
+  const sources = [...sourceRecords].sort((a, b) => a.timestampMs - b.timestampMs);
+  let next = 0;
+  let latest = null;
+  return sources.map((source) => {
+    while (
+      next < mirrors.length &&
+      mirrors[next].attributes.source_last_updated * 1000 <= source.timestampMs + MIRROR_MATCH_MS
+    ) {
+      latest = mirrors[next];
+      next += 1;
+    }
+    if (!latest) return { ...source, attributes: { ...source.attributes } };
+    return {
+      ...source,
+      attributes: { ...stripMirrorKeys(latest.attributes), ...source.attributes },
+    };
+  });
+}
+
+/**
+ * Turn the backend's list of an entity's details into checkbox choices, ticking
+ * those HA does not record unless they change very often.
+ *
+ * @param {{name: string, unrecorded: boolean, volatile: boolean}[]} details
+ * @returns {{name: string, label: string, checked: boolean, note: string}[]}
+ */
+export function detailChoices(details) {
+  return details.map(({ name, unrecorded, volatile }) => {
+    const spaced = name.replace(/_/g, " ");
+    return {
+      name,
+      label: spaced.charAt(0).toUpperCase() + spaced.slice(1),
+      checked: unrecorded && !volatile,
+      note: volatile ? "changes very often, uses more space" : "",
+    };
+  });
+}
+
+/**
+ * Add every saved detail the thing does not currently have to its list of
+ * details, so a detail that is missing right now (a light that is off has no
+ * brightness) is offered again and survives a save unless the user unticks it.
+ *
+ * @param {{name: string, unrecorded: boolean, volatile: boolean}[]} details
+ * @param {string[]} savedNames
+ * @returns {{name: string, unrecorded: boolean, volatile: boolean}[]}
+ */
+export function withSavedDetails(details, savedNames) {
+  const present = new Set(details.map((detail) => detail.name));
+  const absent = savedNames
+    .filter((name) => !present.has(name))
+    .map((name) => ({ name, unrecorded: true, volatile: false }));
+  return [...details, ...absent];
+}
+
 /**
  * Serialise a value to JSON text with object keys sorted at every depth, so two
  * values with the same content always give the same string.
@@ -608,9 +701,24 @@ export function buildMultiFilename(count, startMs, endMs, ext, timeZone) {
   return `${base}.${ext}`;
 }
 
-/** Build the cache key for a fetch: the sorted ids, then the range, so selection order does not matter. */
-export function buildCacheKey(entityIds, startMs, endMs) {
-  return `${[...entityIds].sort().join(",")}|${startMs}|${endMs}`;
+/**
+ * Build the cache key for a fetch: the sorted ids, then the range, so selection
+ * order does not matter, then each chosen thing's saved-detail copy with its
+ * sorted list of saved details, so changing what is saved changes the key.
+ *
+ * @param {string[]} entityIds
+ * @param {number} startMs
+ * @param {number} endMs
+ * @param {{source_entity_id: string, mirror_entity_id: string|null, attributes: string[]}[]} [detailList]
+ * @returns {string}
+ */
+export function buildCacheKey(entityIds, startMs, endMs, detailList = []) {
+  const base = `${[...entityIds].sort().join(",")}|${startMs}|${endMs}`;
+  const saved = detailList
+    .filter((entry) => entry.mirror_entity_id && entityIds.includes(entry.source_entity_id))
+    .map((entry) => JSON.stringify([entry.mirror_entity_id, [...entry.attributes].sort()]))
+    .sort();
+  return saved.length ? `${base}|${saved.join(";")}` : base;
 }
 
 /**

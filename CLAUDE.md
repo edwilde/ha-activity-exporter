@@ -16,23 +16,31 @@ Choosing several entities gives one timeline in one file: the CSV gains an
 entity's output is unchanged.
 
 Design docs: `docs/plans/2026-05-31-ha-activity-exporter-design.md`, then
-`docs/plans/2026-10-25-settings-detail-export-design.md` (settings columns, which supersedes parts of it)
+`docs/plans/2026-10-25-settings-detail-export-design.md` (settings columns, which supersedes parts of it),
+then `docs/plans/2026-10-26-detail-recording-design.md` (the "Save more detail" tab and mirror sensors)
 Plans + built-vs-intended notes: `.ai/implementation-plans/ha-activity-exporter.md`,
 then `.ai/implementation-plans/2026-10-25-settings-detail-export.md`,
-then `.ai/implementation-plans/2026-10-25-multi-entity-export.md` (several-entity export)
+then `.ai/implementation-plans/2026-10-25-multi-entity-export.md` (several-entity export),
+then `.ai/implementation-plans/2026-10-26-detail-recording.md` (detail recording)
 
 ## Architecture (one sentence)
 
-The Python side is deliberately thin — it serves the frontend directory once and
-registers/removes the sidebar panel; **all real work is client-side** in a vanilla
-web component that reads history over the authenticated WebSocket and builds the
-download in the browser. There is **no backend data endpoint**.
+The Python side is deliberately thin: it serves the frontend directory once,
+registers/removes the sidebar panel, runs a `sensor` platform of hidden "mirror"
+sensors (one per thing whose details the user chose to save) and registers three
+WebSocket commands to list, describe and save those choices; **all real work is
+client-side** in a vanilla web component that reads history over the authenticated
+WebSocket, folds the mirrors' details back into the exported rows and builds the
+download in the browser. There is **no backend history endpoint**.
 
 ```
 custom_components/ha_activity_exporter/
-  __init__.py        # async_setup_entry: serve frontend dir + register panel; unload: remove panel
+  __init__.py        # async_setup_entry: serve frontend dir, register panel + WS commands, forward to sensor; unload: remove panel
   config_flow.py     # single-instance, confirm-only flow (no settings)
-  const.py           # the shared contract: domain, URLs, panel name/icon
+  const.py           # the shared contract: domain, URLs, panel name/icon, WS command names
+  detail.py          # pure helpers: denylist, describe a state's details, pick/cap mirror attributes
+  sensor.py          # DetailMirror: hidden sensor copying a source's value + chosen details
+  websocket.py       # detail/list (any user), detail/describe and detail/save (admin)
   manifest.json      # deps: http, frontend, panel_custom
   frontend/
     exporter-core.js          # PURE logic (no DOM) — unit-tested with node --test
@@ -56,7 +64,9 @@ custom_components/ha_activity_exporter/
    static registration is not enough.
 3. **Keep the shared contract in `const.py` consistent** with the JS: domain
    `ha_activity_exporter`, panel served at `/ha_activity_exporter/...`, web
-   component tag `activity-exporter-panel`, sidebar path `activity-exporter`.
+   component tag `activity-exporter-panel`, sidebar path `activity-exporter`, and
+   the WebSocket commands `ha_activity_exporter/detail/list`, `.../describe` and
+   `.../save`.
 4. **Verify HA APIs against source before using them.** Real-HA testing is
    limited here; CI (hassfest + HACS + tests) is the gate.
 
@@ -92,7 +102,19 @@ custom_components/ha_activity_exporter/
   `color_temp(_kelvin)`, `effect` and `hs/rgb/rgbw/rgbww/xy_color` as unrecorded, so
   `history_during_period` never returns them for a `light.*`. Settings-only rows still
   arrive (each with a new `lu`) but carry none of those attributes. A template sensor
-  copying them is recorded normally (verified on 2026.10.4); the README documents it.
+  copying them is recorded normally (verified on 2026.10.4); the "Save more detail" tab
+  automates this with a mirror sensor.
+- `State.state_info["unrecorded_attributes"]` is Python-only: it is not in
+  `State.as_dict()` or the compressed history state, so the frontend cannot see which
+  attributes are unrecorded and must ask the `detail/describe` command.
+- The recorder drops **all** of a state's attributes when their JSON is over 16384
+  bytes, so a mirror trims its own attributes (largest first) to stay under the cap.
+- `SensorEntity` excludes `options` from the recorder through
+  `_entity_component_unrecorded_attributes`. Overriding
+  `_entity_component_unrecorded_attributes = frozenset()` on a subclass clears it,
+  because `Entity.__init_subclass__` rebuilds the combined set for every subclass.
+- The recorder ignores an entity's `hidden_by`, so hiding a mirror in the registry
+  does not stop its states being recorded.
 - `single_config_entry: true` in the manifest makes core handle single-instance
   (aborts the second flow, hides "Add") — no manual guard needed.
 - **manifest.json keys must be ordered `domain, name, then alphabetical`** or
@@ -111,9 +133,10 @@ python -m venv .venv && .venv/bin/pip install -r requirements_test.txt
 .venv/bin/pytest
 ```
 
-The `tests/test_init.py` suite calls `async_setup_entry`/`async_unload_entry`
-directly (only `http` set up) so it stays fast and does not depend on the heavy
-`frontend` component during unit tests.
+The `tests/test_init.py` suite sets the entry up through
+`hass.config_entries.async_setup` with the real dependency chain (`http`,
+`frontend`, `panel_custom`), so the panel and the sensor platform load as they do
+in Home Assistant.
 
 ## Gotchas
 

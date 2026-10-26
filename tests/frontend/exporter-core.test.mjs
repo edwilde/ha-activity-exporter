@@ -15,10 +15,12 @@ import {
   computeRange,
   describeCause,
   describeMissingHistory,
+  detailChoices,
   filterRepeats,
   flattenAttributes,
   formatDateForFilename,
   formatTimestamp,
+  mergeMirrorRecords,
   metadataKeys,
   normaliseRecords,
   parseHistoryRecords,
@@ -31,6 +33,7 @@ import {
   toMultiJson,
   userNamesFromStates,
   wallClockToEpochMs,
+  withSavedDetails,
 } from "../../custom_components/ha_activity_exporter/frontend/exporter-core.js";
 
 // --- chunkRangeByDay ------------------------------------------------------
@@ -1643,6 +1646,57 @@ test("buildCacheKey: a different device set or range changes the key", () => {
   assert.notEqual(base, buildCacheKey(["a", "b"], 10, 21));
 });
 
+/** Build a detail list entry for a source with its mirror and saved details. */
+function savedEntry(source, mirror, attributes) {
+  return { source_entity_id: source, mirror_entity_id: mirror, attributes, dropped: [] };
+}
+
+// Checks changing which details are saved changes the key.
+test("buildCacheKey: a changed saved-detail list changes the key", () => {
+  const before = buildCacheKey(["light.a"], 1, 2, [savedEntry("light.a", "sensor.m_a", ["brightness"])]);
+  const after = buildCacheKey(["light.a"], 1, 2, [
+    savedEntry("light.a", "sensor.m_a", ["brightness", "color_mode"]),
+  ]);
+  assert.notEqual(before, after);
+  assert.notEqual(before, buildCacheKey(["light.a"], 1, 2, []));
+});
+
+// Checks the order of the saved list, and unchosen or mirror-less entries, do not matter.
+test("buildCacheKey: saved-detail order and unrelated entries are ignored", () => {
+  const base = buildCacheKey(["light.a"], 1, 2, [
+    savedEntry("light.a", "sensor.m_a", ["brightness", "color_mode"]),
+  ]);
+  assert.equal(
+    base,
+    buildCacheKey(["light.a"], 1, 2, [
+      savedEntry("light.a", "sensor.m_a", ["color_mode", "brightness"]),
+      savedEntry("fan.b", "sensor.m_b", ["speed"]),
+    ])
+  );
+  assert.equal(
+    buildCacheKey(["light.a"], 1, 2, [savedEntry("light.a", null, ["brightness"])]),
+    buildCacheKey(["light.a"], 1, 2)
+  );
+});
+
+// Checks the order the entries arrive in does not change the key.
+test("buildCacheKey: saved entries in a different order share one key", () => {
+  const a = savedEntry("light.a", "sensor.m_a", ["x"]);
+  const b = savedEntry("fan.b", "sensor.m_b", ["y"]);
+  assert.equal(
+    buildCacheKey(["light.a", "fan.b"], 1, 2, [a, b]),
+    buildCacheKey(["light.a", "fan.b"], 1, 2, [b, a])
+  );
+});
+
+// Checks a different mirror for the same details changes the key.
+test("buildCacheKey: a different mirror changes the key", () => {
+  assert.notEqual(
+    buildCacheKey(["light.a"], 1, 2, [savedEntry("light.a", "sensor.m1", ["x"])]),
+    buildCacheKey(["light.a"], 1, 2, [savedEntry("light.a", "sensor.m2", ["x"])])
+  );
+});
+
 /** Build a records Map from {id: [[state, seconds], ...]} using plain records. */
 function recordsMap(spec) {
   return new Map(
@@ -1705,4 +1759,193 @@ test("describeMissingHistory: names the devices in plain language", () => {
     describeMissingHistory(["Hall", "Garage", "Lounge"]),
     "No history for Hall, Garage and Lounge in this period."
   );
+});
+
+// --- mergeMirrorRecords / detailChoices -----------------------------------
+
+/** Build a source record at the given epoch seconds. */
+function sourceAt(seconds, state, attributes = {}) {
+  return { timestampMs: seconds * 1000, lastChangedMs: seconds * 1000, state, attributes };
+}
+
+/** Build a mirror record that saved details for the source row at `sourceSeconds`. */
+function mirrorFor(sourceSeconds, details, ownSeconds = sourceSeconds + 5) {
+  return {
+    timestampMs: ownSeconds * 1000,
+    lastChangedMs: ownSeconds * 1000,
+    state: "saved",
+    attributes: {
+      source_entity_id: "light.a",
+      source_last_updated: sourceSeconds,
+      friendly_name: "Mirror",
+      ...details,
+    },
+  };
+}
+
+// Checks the join uses source_last_updated, not the mirror row's own later timestamp.
+test("mergeMirrorRecords: joins on source_last_updated even when the mirror row is written later", () => {
+  const merged = mergeMirrorRecords(
+    [sourceAt(100, "on"), sourceAt(200, "on")],
+    [mirrorFor(100, { brightness: 10 }, 150), mirrorFor(200, { brightness: 20 }, 250)]
+  );
+  assert.equal(merged[0].attributes.brightness, 10);
+  assert.equal(merged[1].attributes.brightness, 20);
+});
+
+// Checks a mirror row matches a source row exactly equal to its source_last_updated.
+test("mergeMirrorRecords: matches a source row at exactly source_last_updated", () => {
+  const merged = mergeMirrorRecords([sourceAt(100, "on")], [mirrorFor(100, { brightness: 10 })]);
+  assert.deepEqual(merged[0].attributes, { brightness: 10 });
+});
+
+// Checks a mirror row matches a source row up to 1 ms earlier than source_last_updated.
+test("mergeMirrorRecords: tolerates 1 ms of float error in the join", () => {
+  const source = { ...sourceAt(100, "on"), timestampMs: 100000 - 0.5 };
+  const merged = mergeMirrorRecords([source], [mirrorFor(100, { brightness: 10 })]);
+  assert.equal(merged[0].attributes.brightness, 10);
+});
+
+// Checks the 1 ms tolerance boundary is inclusive.
+test("mergeMirrorRecords: matches a source row exactly 1 ms before source_last_updated", () => {
+  const source = { ...sourceAt(100, "on"), timestampMs: 99999 };
+  const merged = mergeMirrorRecords([source], [mirrorFor(100, { brightness: 10 })]);
+  assert.equal(merged[0].attributes.brightness, 10);
+});
+
+// Checks a source row more than 1 ms before source_last_updated gets no details.
+test("mergeMirrorRecords: skips a source row more than 1 ms before source_last_updated", () => {
+  const source = { ...sourceAt(100, "on"), timestampMs: 99998 };
+  const merged = mergeMirrorRecords([source], [mirrorFor(100, { brightness: 10 })]);
+  assert.deepEqual(merged[0].attributes, {});
+});
+
+// Checks a source row older than the mirror row's source_last_updated is left unchanged.
+test("mergeMirrorRecords: leaves rows before the first mirror row unchanged", () => {
+  const merged = mergeMirrorRecords(
+    [sourceAt(50, "on", { a: 1 }), sourceAt(100, "on")],
+    [mirrorFor(100, { brightness: 10 })]
+  );
+  assert.deepEqual(merged[0].attributes, { a: 1 });
+  assert.equal(merged[1].attributes.brightness, 10);
+});
+
+// Checks a later source row inherits the details of the latest earlier mirror row.
+test("mergeMirrorRecords: carries the latest details forward to later source rows", () => {
+  const merged = mergeMirrorRecords(
+    [sourceAt(100, "on"), sourceAt(150, "on"), sourceAt(250, "on")],
+    [mirrorFor(100, { brightness: 10 }), mirrorFor(200, { brightness: 20 })]
+  );
+  assert.deepEqual(
+    merged.map((r) => r.attributes.brightness),
+    [10, 10, 20]
+  );
+});
+
+// Checks mirror rows given out of order are still joined oldest-first.
+test("mergeMirrorRecords: sorts mirror rows by source_last_updated", () => {
+  const merged = mergeMirrorRecords(
+    [sourceAt(300, "on")],
+    [mirrorFor(200, { brightness: 20 }), mirrorFor(100, { brightness: 10 })]
+  );
+  assert.equal(merged[0].attributes.brightness, 20);
+});
+
+// Checks a value the source recorded wins over the mirror's copy.
+test("mergeMirrorRecords: the recorded attribute wins a clash", () => {
+  const merged = mergeMirrorRecords(
+    [sourceAt(100, "on", { brightness: 1 })],
+    [mirrorFor(100, { brightness: 99, effect: "x" })]
+  );
+  assert.deepEqual(merged[0].attributes, { brightness: 1, effect: "x" });
+});
+
+// Checks the mirror's own bookkeeping attributes never reach the merged row.
+test("mergeMirrorRecords: strips the mirror's own keys", () => {
+  const merged = mergeMirrorRecords([sourceAt(100, "on")], [mirrorFor(100, { brightness: 10 })]);
+  assert.deepEqual(Object.keys(merged[0].attributes), ["brightness"]);
+});
+
+// Checks the inputs are not changed and the output rows are new objects.
+test("mergeMirrorRecords: does not mutate its inputs", () => {
+  const source = [sourceAt(50, "on", { a: 1 }), sourceAt(100, "on", { a: 2 })];
+  const mirror = [mirrorFor(100, { brightness: 10 })];
+  const sourceCopy = structuredClone(source);
+  const mirrorCopy = structuredClone(mirror);
+  const merged = mergeMirrorRecords(source, mirror);
+  assert.deepEqual(source, sourceCopy);
+  assert.deepEqual(mirror, mirrorCopy);
+  assert.notEqual(merged[0], source[0]);
+});
+
+// Checks source rows given out of order come back oldest-first.
+test("mergeMirrorRecords: returns source rows sorted oldest-first", () => {
+  const merged = mergeMirrorRecords([sourceAt(200, "b"), sourceAt(100, "a")], []);
+  assert.deepEqual(
+    merged.map((r) => r.state),
+    ["a", "b"]
+  );
+});
+
+// Checks a source with no rows is rebuilt from the mirror rows alone.
+test("mergeMirrorRecords: rebuilds rows from the mirror when the source has none", () => {
+  const merged = mergeMirrorRecords([], [mirrorFor(200, { brightness: 20 }, 250), mirrorFor(100, { brightness: 10 }, 150)]);
+  assert.equal(merged.length, 2);
+  assert.equal(merged[0].timestampMs, 100000);
+  assert.equal(merged[0].lastChangedMs, 100000);
+  assert.equal(merged[0].state, "saved");
+  assert.deepEqual(merged[0].attributes, { brightness: 10 });
+  assert.equal(merged[1].timestampMs, 200000);
+  assert.deepEqual(merged[1].attributes, { brightness: 20 });
+});
+
+// Checks mirror rows without a numeric source_last_updated are ignored.
+test("mergeMirrorRecords: ignores mirror rows with no source_last_updated", () => {
+  const bad = { timestampMs: 1, lastChangedMs: 1, state: "saved", attributes: { brightness: 5 } };
+  assert.deepEqual(mergeMirrorRecords([], [bad]), []);
+  const merged = mergeMirrorRecords([sourceAt(100, "on")], [bad]);
+  assert.deepEqual(merged[0].attributes, {});
+});
+
+// Checks the pre-ticked boxes: unrecorded and steady only.
+test("detailChoices: ticks only unrecorded, non-volatile details", () => {
+  const choices = detailChoices([
+    { name: "brightness", unrecorded: true, volatile: false },
+    { name: "color_temp", unrecorded: false, volatile: false },
+    { name: "media_position", unrecorded: true, volatile: true },
+  ]);
+  assert.deepEqual(
+    choices.map((c) => [c.name, c.checked]),
+    [["brightness", true], ["color_temp", false], ["media_position", false]]
+  );
+});
+
+// Checks the plain-language label and the note for very busy details.
+test("detailChoices: labels with spaces and notes volatile details", () => {
+  const [steady, busy] = detailChoices([
+    { name: "color_temp_kelvin", unrecorded: true, volatile: false },
+    { name: "media_position", unrecorded: true, volatile: true },
+  ]);
+  assert.equal(steady.label, "Color temp kelvin");
+  assert.equal(steady.note, "");
+  assert.equal(busy.label, "Media position");
+  assert.equal(busy.note, "changes very often, uses more space");
+});
+
+// --- withSavedDetails ------------------------------------------------------
+
+// Checks a saved detail the thing lacks right now is offered again, ticked-ready.
+test("withSavedDetails: adds saved names the thing does not have right now", () => {
+  const present = [{ name: "color_mode", unrecorded: false, volatile: false }];
+  assert.deepEqual(withSavedDetails(present, ["brightness", "color_mode"]), [
+    ...present,
+    { name: "brightness", unrecorded: true, volatile: false },
+  ]);
+});
+
+// Checks nothing is duplicated or added when every saved name is already present.
+test("withSavedDetails: leaves the list alone when everything saved is present", () => {
+  const present = [{ name: "brightness", unrecorded: true, volatile: false }];
+  assert.deepEqual(withSavedDetails(present, ["brightness"]), present);
+  assert.deepEqual(withSavedDetails(present, []), present);
 });

@@ -20,3 +20,17 @@ PANEL_JS_URL = f"{PANEL_URL_BASE}/{PANEL_JS_FILENAME}"
 
 # hass.data key marking that the (process-wide) static path has been registered.
 DATA_STATIC_REGISTERED = "static_registered"
+# hass.data key marking that the (process-wide) WebSocket commands are registered.
+DATA_WS_REGISTERED = "ws_registered"
+
+# Detail recording: mirror entities that save attributes the recorder drops.
+CONF_TRACKED = "tracked"
+ATTR_SOURCE_ENTITY_ID = "source_entity_id"
+ATTR_SOURCE_LAST_UPDATED = "source_last_updated"
+# The recorder's per-state attribute size cap, mirrored so this integration does
+# not import recorder internals.
+MAX_RECORDED_ATTRS_BYTES = 16384
+
+WS_DETAIL_LIST = f"{DOMAIN}/detail/list"
+WS_DETAIL_DESCRIBE = f"{DOMAIN}/detail/describe"
+WS_DETAIL_SAVE = f"{DOMAIN}/detail/save"

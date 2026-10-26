@@ -1,61 +1,113 @@
 """Tests for Activity Exporter setup and teardown.
 
-These call ``async_setup_entry`` / ``async_unload_entry`` directly rather than
-going through ``config_entries.async_setup`` so the suite does not depend on the
-heavyweight ``frontend`` component (and its ``hass_frontend`` asset package)
-being installed. Panel registration only writes to ``hass.data[DATA_PANELS]``,
-so setting up ``http`` (needed for the static path) is sufficient.
+The entry is set up through ``hass.config_entries.async_setup`` so the real
+dependency chain (``http``, ``frontend``, ``panel_custom``) and the sensor
+platform load as they do in Home Assistant.
 """
 
+import logging
+
+import pytest
+from homeassistant.components import panel_custom
 from homeassistant.components.frontend import DATA_PANELS
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.ha_activity_exporter import (
-    async_setup_entry,
-    async_unload_entry,
+from custom_components.ha_activity_exporter.const import (
+    CONF_TRACKED,
+    DOMAIN,
+    PANEL_JS_URL,
+    PANEL_URL_PATH,
+    PANEL_WEBCOMPONENT_NAME,
 )
-from custom_components.ha_activity_exporter.const import DOMAIN, PANEL_URL_PATH
+
+LAMP = "light.lamp"
+MIRROR = "sensor.activity_exporter_light_lamp"
+
+
+def _errors(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """Return the messages of every error-level log record."""
+    return [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
 
 
 async def _http_ready(hass: HomeAssistant) -> None:
+    """Set up the http component the panel's static path needs."""
     assert await async_setup_component(hass, "http", {})
     await hass.async_block_till_done()
+
+
+async def _setup_entry(
+    hass: HomeAssistant, options: dict | None = None
+) -> MockConfigEntry:
+    """Add the config entry and set it up through Home Assistant."""
+    await _http_ready(hass)
+    entry = MockConfigEntry(domain=DOMAIN, options=options or {})
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    return entry
 
 
 async def test_setup_registers_panel_and_unload_removes_it(
     hass: HomeAssistant,
 ) -> None:
     """Setup adds the sidebar panel; unload removes it."""
-    await _http_ready(hass)
-    entry = MockConfigEntry(domain=DOMAIN)
-    entry.add_to_hass(hass)
-
-    assert await async_setup_entry(hass, entry) is True
+    entry = await _setup_entry(hass)
+    assert entry.state is ConfigEntryState.LOADED
     assert PANEL_URL_PATH in hass.data.get(DATA_PANELS, {})
 
-    assert await async_unload_entry(hass, entry) is True
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    assert entry.state is ConfigEntryState.NOT_LOADED
     assert PANEL_URL_PATH not in hass.data.get(DATA_PANELS, {})
 
 
-async def test_repeated_setup_keeps_single_panel(hass: HomeAssistant) -> None:
-    """A second setup (e.g. a reload) re-registers without raising."""
-    await _http_ready(hass)
-    entry = MockConfigEntry(domain=DOMAIN)
-    entry.add_to_hass(hass)
+async def test_reload_keeps_single_panel(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Reloading a loaded entry re-registers the panel and mirrors without an error."""
+    hass.states.async_set(LAMP, "on", {"brightness": 120})
+    entry = await _setup_entry(hass, {CONF_TRACKED: {LAMP: ["brightness"]}})
+    caplog.clear()
 
-    assert await async_setup_entry(hass, entry) is True
-    # Re-running setup must not raise the "Overwriting panel" ValueError.
-    assert await async_setup_entry(hass, entry) is True
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert entry.state is ConfigEntryState.LOADED
     assert PANEL_URL_PATH in hass.data.get(DATA_PANELS, {})
+    assert hass.states.get(MIRROR).attributes["brightness"] == 120
+    assert _errors(caplog) == []
+
+
+async def test_setup_replaces_a_stale_panel(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Setup replaces a panel left registered by an earlier run without an error."""
+    entry = await _setup_entry(hass)
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await panel_custom.async_register_panel(
+        hass,
+        frontend_url_path=PANEL_URL_PATH,
+        webcomponent_name=PANEL_WEBCOMPONENT_NAME,
+        module_url=PANEL_JS_URL,
+    )
+    caplog.clear()
+
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert entry.state is ConfigEntryState.LOADED
+    assert PANEL_URL_PATH in hass.data.get(DATA_PANELS, {})
+    assert _errors(caplog) == []
 
 
 async def test_static_path_registered_once(hass: HomeAssistant) -> None:
     """The frontend static path is only registered once per process."""
-    await _http_ready(hass)
-    entry = MockConfigEntry(domain=DOMAIN)
-    entry.add_to_hass(hass)
+    entry = await _setup_entry(hass)
+    assert hass.data[DOMAIN]["static_registered"] is True
 
-    assert await async_setup_entry(hass, entry) is True
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.LOADED
     assert hass.data[DOMAIN]["static_registered"] is True
