@@ -297,6 +297,8 @@ The **Save more detail** tab fixes that, with no configuration files:
 3. Tick the details to keep. The ones Home Assistant doesn't normally save are ticked for you.
 4. Click **Save**.
 
+![The Save more detail tab, choosing which of a light's details to keep](docs/images/save-more-detail.jpg)
+
 From then on the details are saved, and your exports of that device include them automatically, on the device's own rows. Use **Change** to alter what is kept, or **Stop saving** to stop.
 
 Good to know:

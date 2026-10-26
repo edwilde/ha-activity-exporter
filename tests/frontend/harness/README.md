@@ -25,6 +25,8 @@ Open `http://127.0.0.1:8765/tests/frontend/harness/index.html`. The built-in ser
 | `now=<epoch ms>` | Freezes `Date.now()` so the fixture data, the time range and the file names repeat exactly between loads. |
 | `many=<n>` | Adds `n` extra sensors (`sensor.extra_01` and up), for the 20 device limit. |
 | `rows=<n>` | Rows each extra sensor has in the last day (default 50), for a busy export. |
+| `admin=0` | Signs in as a non-admin, so the "Save more detail" tab is hidden. |
+| `saved=1` | Starts with the hall light's brightness already being saved. Saves made on the page are kept until reload. |
 
 ## What it records
 
