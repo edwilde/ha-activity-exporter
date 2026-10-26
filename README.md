@@ -3,27 +3,24 @@
 Export the history of one or more devices or sensors to a **CSV** or **JSON** file,
 straight from a panel in your Home Assistant sidebar. No configuration, no scripting.
 
-It's built for one job: getting a clean, faithful dump of your devices' history out of
-Home Assistant so you can open it in a spreadsheet or hand it to an AI for analysis.
-
-> **Designed for everyone.** You don't need to know any Home Assistant jargon to use
-> it. Pick your devices, pick a time period, click download.
+It gets a faithful copy of your devices' history out of Home Assistant, to open in a
+spreadsheet or hand to an AI for analysis. You don't need to know any Home Assistant
+jargon: pick your devices, pick a time period, click download.
 
 ![The Activity Exporter panel in the Home Assistant sidebar](docs/images/activity-exporter-panel.jpg)
 
 ## What it does
 
-- 🔎 **Pick a device or sensor** with a searchable selector, or add up to 20 to export them together in one file.
-- 🗓️ **Choose a time period** — quick buttons (last 24 hours / 7 days / 30 days) or your own start and end dates.
-- 🎚️ **Every setting in its own column** - temperature, position, mode and more each get a column in the spreadsheet, and every recorded step is included, so you can see exactly what a device did and when. (Home Assistant leaves some details out of its history, like a light's brightness, but you can choose to keep them, see [Saving more detail](#saving-more-detail).)
-- 💾 **Save more detail** - an admin can pick any device or sensor and choose extra details to keep from now on, such as a light's brightness and colour. They then show up in exports automatically.
-- 🧹 **Skip repeats** - an optional switch that leaves out rows where neither the value nor any setting changed, so your file isn't full of noise.
-- 📊 **Download as a spreadsheet (CSV)** — opens in Excel, Numbers, or Google Sheets.
-- 🤖 **Download as a data file (JSON)** — self-describing, ideal for feeding to an LLM.
-- ⏳ **Live progress** while it gathers the history.
+- **Pick a device or sensor** with a searchable selector, or up to 20 to export together in one file.
+- **Choose a time period**: last 24 hours, 7 days or 30 days, or your own start and end dates.
+- **Every setting in its own column**: temperature, position, mode and more each get a spreadsheet column, and every recorded step is included.
+- **Save more detail**: an admin can choose extra details to keep from now on, such as a light's brightness and colour, which Home Assistant normally leaves out. They then show up in exports automatically.
+- **Skip repeats**: optionally leave out rows where neither the value nor any setting changed.
+- **Download as a spreadsheet (CSV)** for Excel, Numbers or Google Sheets, or **as a data file (JSON)** for an AI.
+- **Live progress** while it gathers the history.
 
-It does **not** change, summarise, or interpret your data. It exports the history
-Home Assistant recorded (optionally minus the repeats).
+It does **not** change, summarise or interpret your data. It exports what Home
+Assistant recorded, optionally minus the repeats.
 
 ## Installation
 
@@ -48,14 +45,14 @@ Home Assistant recorded (optionally minus the repeats).
 
 1. Open **Activity Exporter** from the sidebar.
 2. **What do you want to export?** Start typing the name of a device or sensor and pick it. To export several at once, add another. To take one off the list, clear it with its X, or press Remove if you see a plain text box instead of a dropdown.
-3. **Time period** — tap a quick button, or choose your own start and end dates.
+3. **Time period**: tap a quick button, or choose your own start and end dates.
 4. Optionally turn on **Skip repeats** to leave out rows where nothing changed.
 5. Leave **Give each setting its own column** on to get one spreadsheet column per setting (temperature, position, mode and so on; for lights, see [Saving more detail](#saving-more-detail)), or turn it off for a simple three-column file (five columns when several devices are chosen).
 6. Click **Download spreadsheet (CSV)** or **Download data file (JSON)**.
 
 ## What the files look like
 
-**CSV** - one row each time Home Assistant recorded a change, including changes to a setting while the value stays the same. `seconds_since_previous` is the time since the row above it, and each setting has its own column. Descriptive information such as the name, icon, units and supported modes is left out of the columns; `details` holds anything that could not get a column.
+**CSV**: one row each time Home Assistant recorded a change, including a setting changing while the value stays the same. `seconds_since_previous` is the time since the row above. Each setting has its own column; descriptive information such as the name, icon, units and supported modes is left out, and `details` holds anything that could not get a column.
 
 ```csv
 timestamp,value,seconds_since_previous,current_temperature,hvac_action,temperature,changed_by,details
@@ -66,9 +63,9 @@ timestamp,value,seconds_since_previous,current_temperature,hvac_action,temperatu
 
 With **Give each setting its own column** turned off, the header is `timestamp,value,details` and `details` holds all the extra information as compact JSON.
 
-When Home Assistant knows what caused a change, the spreadsheet gains a `changed_by` column just before `details`. It names the script, automation, action or person behind an on/off style change, for example `script.morning_warmup (Morning warm-up)`, as in the example above, or `light.turn_on`. A person is shown by name when they are set up in Home Assistant as a person with a user account, otherwise by an id such as `user 3f2a...`. In the JSON file the same information appears as a `cause` entry on that row. The column is left out of the spreadsheet when none of the rows has a cause, and it does not appear when each setting's own column is turned off.
+When Home Assistant knows what caused a change of value, the spreadsheet gains a `changed_by` column before `details`, naming the script, automation, action or person behind it: `script.morning_warmup (Morning warm-up)` above, or `light.turn_on`. A person is shown by name when they have a Home Assistant person with a user account, otherwise by an id such as `user 3f2a...`. The JSON has the same information as a `cause` entry on the row. The column is left out when no row has a cause, or when per-setting columns are turned off.
 
-**JSON** - a self-describing wrapper so an LLM has all the context it needs. `entity` describes the device, and each record has a `derived` block with values worked out for you, such as whether the value itself changed and the seconds since the previous row (shown here for the three-row export above):
+**JSON**: a self-describing wrapper, so an AI has the context it needs. `entity` describes the device, and each record has a `derived` block of worked-out values, such as whether the value changed and the seconds since the previous row. This is the same three-row export:
 
 ```json
 {
@@ -166,15 +163,15 @@ When Home Assistant knows what caused a change, the spreadsheet gains a `changed
 
 `last_changed` is when the value itself last changed, so on a row where only a setting changed it is earlier than `timestamp` (above, the heat pump switched on at 06:30:00 and its room temperature reading was updated at 06:42:30).
 
-The first row is usually the value at the start of the period, which Home Assistant stamps with the period's start time (the 06:00:00 row above). It does not say when that value began, so in JSON that row has `last_changed: null` and `derived.start_of_period: true` (with `state_changed: null`). To find out how long the value had been in place, look at the next row where only a setting changed: its `last_changed` can reach back before the period. The spreadsheet shows the same first row at the period's start time, with no marker.
+The first row is usually the value at the start of the period, stamped with the period's start time (06:00:00 above). Home Assistant does not say when that value began, so in JSON the row has `last_changed: null`, `state_changed: null` and `derived.start_of_period: true`. The next row where only a setting changed can show how long it had been in place, as its `last_changed` may reach back before the period. The spreadsheet shows this row with no marker.
 
-`state_changes_only` is `true` when **Skip repeats** was on. With it on, `seconds_since_previous` is the time since the previous row in the file, so it spans any rows that were left out.
+`state_changes_only` is `true` when **Skip repeats** was on. `seconds_since_previous` is then measured to the previous row in the file, spanning any rows left out.
 
 ## Several devices at once
 
-Choose two or more devices (up to 20) and the download is still one file, with every device's history on a single timeline. With one device chosen the files are exactly as described above.
+Choose two or more devices (up to 20) and the download is still one file, with every device's history on one timeline.
 
-**CSV** - rows run in time order across all the devices, and `entity_id` and `name` come first so you can tell whose row is whose. `seconds_since_previous` is measured to that same device's previous row, not to the row above it. The columns are the combined settings of every chosen device, so a mix of different kinds of device gives a wide file where most cells on any row are blank. In the example the lamp's own rows carry only on and off, and its brightness and colour come from the rows of a separate settings sensor that copies them (here one made by hand; if you save the lamp's details with [Save more detail](#saving-more-detail) they appear on the lamp's own rows instead). The sensor's `value` is the brightness (0 to 255) and its `hs_color` becomes the `hue` and `saturation` columns. With **Give each setting its own column** turned off, the columns are `entity_id,name,timestamp,value,details`.
+**CSV**: rows run in time order across all the devices, with `entity_id` and `name` first. `seconds_since_previous` is measured to the same device's previous row, not the row above. The columns are the combined settings of every chosen device, so a mix of device types gives a wide file with mostly blank cells. In the example the lamp's rows carry only on and off; its brightness (0 to 255) and colour come from a hand-made settings sensor, whose `hs_color` becomes the `hue` and `saturation` columns. Details kept with [Save more detail](#saving-more-detail) appear on the lamp's own rows instead. With per-setting columns turned off, the columns are `entity_id,name,timestamp,value,details`.
 
 ```csv
 entity_id,name,timestamp,value,seconds_since_previous,color_mode,hue,saturation,current_temperature,hvac_action,temperature,details
@@ -189,7 +186,7 @@ light.bedroom_lamp,Bedroom lamp,2026-01-15T13:25:00+13:00,off,900,,,,,,,
 sensor.bedroom_lamp_settings,Bedroom lamp settings,2026-01-15T13:25:00+13:00,0,870,,,,,,,
 ```
 
-**JSON** - the shared period and totals come first, then an `entities` list. Each entry has the same shape as the single-device file (without the period and export time, which are shared), and each device's `derived` values are worked out from that device's own rows. The excerpt below is trimmed to the second record of the lamp and of its settings sensor, and leaves out the heat pump; `entity_count` and `record_count` describe the full file.
+**JSON**: the shared period and totals come first, then an `entities` list. Each entry has the single-device shape without the period and export time, and its `derived` values come from that device's own rows. The excerpt is trimmed to the second record of the lamp and of its settings sensor, without the heat pump; `entity_count` and `record_count` describe the full file.
 
 ```json
 {
@@ -277,20 +274,20 @@ The file is named `activity-export_<number>-items_<start>_<end>.csv` (or `.json`
 
 ## How it works (for the curious)
 
-The panel runs entirely in your browser, using your existing Home Assistant login.
-It reads history over Home Assistant's WebSocket API (`history/history_during_period`),
-asks the logbook (`logbook/get_events`) what caused each change, builds the file in
-your browser, and downloads it directly. Nothing is sent anywhere else, and no history
-endpoint is added. The only server-side parts are the hidden sensors for
-[Saving more detail](#saving-more-detail) and three small commands the panel uses to
-list, look up and choose what they keep. Large date ranges are fetched a day at a time so you get a
-real progress bar, and both requests carry all of the chosen devices for each day.
+The panel runs in your browser with your existing Home Assistant login. It reads
+history over the WebSocket API (`history/history_during_period`), asks the logbook
+(`logbook/get_events`) what caused each change, and builds and downloads the file in
+the browser. Nothing is sent anywhere else and no history endpoint is added. The only
+server-side parts are the hidden sensors behind [Saving more detail](#saving-more-detail)
+and three commands the panel uses to list, look up and choose what they keep. History
+is fetched a day at a time, for all the chosen devices at once, which drives the
+progress bar.
 
 ## Saving more detail
 
-Home Assistant leaves some details out of its history on purpose. A light's brightness and colour, a speaker's list of inputs and sound modes, a heat pump's list of supported fan modes and many more are shown live but never saved ([home-assistant/core#121776](https://github.com/home-assistant/core/pull/121776) is the change for lights). An export of such a device shows a row for each step it took, but without those details, and with **Skip repeats** on those rows can drop out because nothing recorded changed.
+Home Assistant leaves some details out of its history on purpose. A light's brightness and colour, a speaker's inputs and sound modes, a heat pump's supported fan modes and many more are shown live but never saved ([home-assistant/core#121776](https://github.com/home-assistant/core/pull/121776) made this change for lights). An export shows a row for each step such a device took, but without those details, and **Skip repeats** can drop those rows because nothing recorded changed.
 
-The **Save more detail** tab fixes that, with no configuration files:
+The **Save more detail** tab keeps them, with no configuration files:
 
 1. Open **Activity Exporter** and switch to the **Save more detail** tab.
 2. Pick a device or sensor.
@@ -299,30 +296,25 @@ The **Save more detail** tab fixes that, with no configuration files:
 
 ![The Save more detail tab, choosing which of a light's details to keep](docs/images/save-more-detail.jpg)
 
-From then on the details are saved, and your exports of that device include them automatically, on the device's own rows. Use **Change** to alter what is kept, or **Stop saving** to stop.
+From then on the details are saved, and exports of that device include them on its own rows. Use **Change** to alter what is kept, or **Stop saving** to stop.
 
 Good to know:
 
-- 👤 Only Home Assistant admins see the tab. Anyone who can export gets the saved details in their exports.
-- ⏱️ Saving starts from now. Earlier history never had these details and can't be filled in.
-- 🔒 Some details are never saved, such as access tokens, passwords and picture links, and they are not offered.
-- 📈 Details that change very often (a playing song's position, for example) use more space. They are unticked and marked so you can decide.
-- 📦 Each thing you save adds one hidden sensor to Home Assistant that holds its details. Stopping removes the sensor, but what it already saved stays in your history until Home Assistant's normal clean-up removes it.
-- 📏 If a thing's details are too big for Home Assistant to store, the biggest are left out and the tab says which.
-- ✏️ If a saved device is renamed or removed, the tab shows "Can't find this any more". Stop saving it and add it again under its new name.
+- Only Home Assistant admins see the tab. Anyone who can export gets the saved details.
+- Saving starts from now. Earlier history can't be filled in.
+- Access tokens, passwords, picture links and similar are never offered.
+- Details that change very often, such as a playing song's position, use more space, so they start unticked and are marked.
+- Each saved device adds one hidden sensor holding its details. Stopping removes the sensor; what it saved stays in your history until Home Assistant's normal clean-up.
+- If the details are too big for Home Assistant to store, the biggest are left out and the tab lists them.
+- If a saved device is renamed or removed, the tab shows "Can't find this any more". Stop saving it and add it again under its new name.
 
 ## Limitations
 
-- Only covers history that Home Assistant has actually recorded, plus any extra detail you chose to save (see [Saving more detail](#saving-more-detail)), which only exists from the moment you started saving it. If a thing is
-  excluded from recording, or the range predates your retention period, there will be
-  nothing to export.
-- The whole result is assembled in your browser, so extremely long ranges of a very
-  chatty sensor may be slow.
-- `changed_by` is blank for steps that only change a setting (a room temperature reading, for example), because Home Assistant only notes what caused a change of value. It is also blank for sensors that report a unit, which Home Assistant leaves out of its activity log.
+- Only history Home Assistant recorded can be exported, plus any detail you chose to save from the moment you saved it. A device excluded from recording, or a range older than your retention period, gives nothing.
+- The file is built in your browser, so very long ranges of a busy sensor may be slow.
+- `changed_by` is blank for steps that only change a setting (a room temperature reading, for example), because Home Assistant only notes what caused a change of value. It is also blank for sensors with a unit, which Home Assistant leaves out of its activity log.
 
 ## Development & testing
-
-Real Home Assistant testing is intentionally light; correctness is guarded by tests + CI.
 
 ```bash
 # Frontend pure-function tests (no build step required)
@@ -330,8 +322,8 @@ node --test tests/frontend/*.test.mjs
 
 # Python tests
 pip install -r requirements_test.txt
-# The frontend asset package isn't pulled in by the test helper; install the
-# version Home Assistant core pins so the frontend component can set up:
+# The test helper doesn't pull in the frontend asset package; install the
+# version Home Assistant core pins:
 pip install -c "$(python -c 'import os,homeassistant;print(os.path.join(os.path.dirname(homeassistant.__file__),"package_constraints.txt"))')" home-assistant-frontend
 pytest
 ```
